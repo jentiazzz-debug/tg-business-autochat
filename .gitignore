@@ -1,0 +1,21 @@
+# Секреты и данные — в репозиторий не попадают никогда.
+.env
+data/
+*.db
+*.db-wal
+*.db-shm
+*.session
+*.session-journal
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Редакторы
+.idea/
+.vscode/
+*.swp
+.DS_Store
