@@ -14,7 +14,9 @@ import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import BotCommand
 
 import business
@@ -41,6 +43,37 @@ COMMANDS = (
     ("log", "Последние ответы"),
     ("help", "Справка"),
 )
+
+
+#: Сколько раз повторить запрос, упёршийся в лимит Telegram.
+RETRIES = 3
+
+
+class RetryAfter(BaseRequestMiddleware):
+    """Переждать лимит Telegram и повторить запрос.
+
+    Открытый бот обслуживает многих владельцев сразу, и при всплеске
+    (кто-то удалил переписку целиком — это карточка плюс вложения)
+    Telegram отвечает 429 «retry after N». Без этого слоя такой ответ
+    просто терялся бы: карточка об удалении не дошла, и владелец даже не
+    узнал бы, что она была. Ждать сказанное число секунд — единственный
+    правильный способ реакции на 429, наращивать частоту бессмысленно.
+    """
+
+    async def __call__(self, make_request, bot, method):
+        for attempt in range(RETRIES):
+            try:
+                return await make_request(bot, method)
+            except TelegramRetryAfter as err:
+                log.warning(
+                    "лимит Telegram на %s: ждём %s с (попытка %s из %s)",
+                    type(method).__name__,
+                    err.retry_after,
+                    attempt + 1,
+                    RETRIES,
+                )
+                await asyncio.sleep(err.retry_after + 0.5)
+        return await make_request(bot, method)
 
 
 async def cleanup() -> None:
@@ -70,6 +103,7 @@ async def run() -> None:
             parse_mode=ParseMode.HTML, link_preview_is_disabled=True
         ),
     )
+    bot.session.middleware(RetryAfter())
     dispatcher = Dispatcher()
 
     # Бизнес-роутер идёт первым: он обслуживает свои типы апдейтов и с
@@ -90,10 +124,14 @@ async def run() -> None:
             "→ Business Mode → Enable.",
             me.username,
         )
-    if not config.ALLOWED_IDS:
-        log.warning(
-            "ALLOWED_IDS пуст: подключить бота к своим чатам сможет любой, "
-            "кто его найдёт. Для личного автоответчика впиши свой id в .env."
+    if config.ALLOWED_IDS:
+        log.info("закрытый режим: подключаться могут %s", sorted(config.ALLOWED_IDS))
+    else:
+        log.info(
+            "открытый режим: подключить бота к своим чатам может любой. "
+            "У каждого владельца свои правила, тексты, архив и статистика — "
+            "они не пересекаются. Чтобы закрыть бота, впиши свой id в "
+            "ALLOWED_IDS."
         )
 
     await bot.set_my_commands(
