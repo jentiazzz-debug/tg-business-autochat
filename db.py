@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Iterable
 
@@ -37,6 +38,7 @@ CREATE TABLE IF NOT EXISTS connections (
     enabled      INTEGER NOT NULL DEFAULT 1,
     can_reply    INTEGER NOT NULL DEFAULT 0,
     can_read     INTEGER NOT NULL DEFAULT 1,
+    rights       TEXT,
     created_at   INTEGER NOT NULL,
     updated_at   INTEGER NOT NULL
 );
@@ -56,6 +58,14 @@ CREATE TABLE IF NOT EXISTS settings (
     cooldown      INTEGER NOT NULL,
     pause_minutes INTEGER NOT NULL,
     keep_days     INTEGER NOT NULL,
+    prefix        TEXT    NOT NULL DEFAULT '.',
+    commands      INTEGER NOT NULL DEFAULT 1,
+    filter_on     INTEGER NOT NULL DEFAULT 1,
+    filter_delete INTEGER NOT NULL DEFAULT 1,
+    filter_score  INTEGER NOT NULL DEFAULT 3,
+    filter_words  TEXT    NOT NULL DEFAULT '',
+    filter_files  INTEGER NOT NULL DEFAULT 1,
+    notify_new    INTEGER NOT NULL DEFAULT 0,
     created_at    INTEGER NOT NULL
 );
 
@@ -82,9 +92,44 @@ CREATE TABLE IF NOT EXISTS chats (
     owner_seen INTEGER NOT NULL DEFAULT 0,
     seen       INTEGER NOT NULL DEFAULT 0,
     replies    INTEGER NOT NULL DEFAULT 0,
+    muted      INTEGER NOT NULL DEFAULT 0,
+    trusted    INTEGER NOT NULL DEFAULT 0,
+    note       TEXT,
+    incoming   INTEGER NOT NULL DEFAULT 0,
+    deleted    INTEGER NOT NULL DEFAULT 0,
+    edited     INTEGER NOT NULL DEFAULT 0,
+    flagged    INTEGER NOT NULL DEFAULT 0,
+    first_seen INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (owner_id, chat_id)
 );
 CREATE INDEX IF NOT EXISTS chats_seen ON chats (owner_id, seen);
+
+CREATE TABLE IF NOT EXISTS profiles (
+    owner_id   INTEGER PRIMARY KEY,
+    first_name TEXT,
+    last_name  TEXT,
+    bio        TEXT,
+    photo_id   TEXT,
+    saved_at   INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS snips (
+    owner_id INTEGER NOT NULL,
+    name     TEXT NOT NULL,
+    body     TEXT NOT NULL,
+    used     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (owner_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS scores (
+    owner_id INTEGER NOT NULL,
+    chat_id  INTEGER NOT NULL,
+    game     TEXT NOT NULL,
+    wins     INTEGER NOT NULL DEFAULT 0,
+    losses   INTEGER NOT NULL DEFAULT 0,
+    draws    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (owner_id, chat_id, game)
+);
 
 CREATE TABLE IF NOT EXISTS messages (
     owner_id   INTEGER NOT NULL,
@@ -130,6 +175,14 @@ SETTING_FIELDS = (
     "cooldown",
     "pause_minutes",
     "keep_days",
+    "prefix",
+    "commands",
+    "filter_on",
+    "filter_delete",
+    "filter_score",
+    "filter_words",
+    "filter_files",
+    "notify_new",
 )
 
 _db: aiosqlite.Connection | None = None
@@ -146,6 +199,45 @@ async def connect() -> None:
     # в блокировки.
     await _db.execute("PRAGMA journal_mode=WAL")
     await _db.commit()
+    await _migrate()
+
+
+#: Столбцы, появившиеся после первых установок. CREATE TABLE IF NOT
+#: EXISTS существующую таблицу не трогает, поэтому новые поля нужно
+#: досыпать вручную — иначе у всех, кто уже запустил бота, обновление
+#: падает на первом же запросе.
+_ADDED = {
+    "connections": {"rights": "TEXT"},
+    "settings": {
+        "prefix": "TEXT NOT NULL DEFAULT '.'",
+        "commands": "INTEGER NOT NULL DEFAULT 1",
+        "filter_on": "INTEGER NOT NULL DEFAULT 1",
+        "filter_delete": "INTEGER NOT NULL DEFAULT 1",
+        "filter_score": "INTEGER NOT NULL DEFAULT 3",
+        "filter_words": "TEXT NOT NULL DEFAULT ''",
+        "filter_files": "INTEGER NOT NULL DEFAULT 1",
+        "notify_new": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "chats": {
+        "muted": "INTEGER NOT NULL DEFAULT 0",
+        "trusted": "INTEGER NOT NULL DEFAULT 0",
+        "note": "TEXT",
+        "incoming": "INTEGER NOT NULL DEFAULT 0",
+        "deleted": "INTEGER NOT NULL DEFAULT 0",
+        "edited": "INTEGER NOT NULL DEFAULT 0",
+        "flagged": "INTEGER NOT NULL DEFAULT 0",
+        "first_seen": "INTEGER NOT NULL DEFAULT 0",
+    },
+}
+
+
+async def _migrate() -> None:
+    for table, columns in _ADDED.items():
+        rows = await _all(f"PRAGMA table_info({table})")
+        have = {r["name"] for r in rows}
+        for name, ddl in columns.items():
+            if name not in have:
+                await _run(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
 
 async def close() -> None:
@@ -189,6 +281,7 @@ async def save_connection(
     enabled: bool,
     can_reply: bool,
     can_read: bool = True,
+    rights: dict[str, bool] | None = None,
     username: str | None = None,
     name: str | None = None,
 ) -> None:
@@ -203,9 +296,9 @@ async def save_connection(
         """
         INSERT INTO connections (
             id, owner_id, user_chat_id, username, name,
-            enabled, can_reply, can_read, created_at, updated_at
+            enabled, can_reply, can_read, rights, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             owner_id = excluded.owner_id,
             user_chat_id = excluded.user_chat_id,
@@ -214,6 +307,7 @@ async def save_connection(
             enabled = excluded.enabled,
             can_reply = excluded.can_reply,
             can_read = excluded.can_read,
+            rights = COALESCE(excluded.rights, connections.rights),
             updated_at = excluded.updated_at
         """,
         (
@@ -225,6 +319,7 @@ async def save_connection(
             int(enabled),
             int(can_reply),
             int(can_read),
+            json.dumps(rights, ensure_ascii=False) if rights else None,
             now,
             now,
         ),
@@ -405,12 +500,175 @@ async def touch_chat(
             title = COALESCE(?, title),
             username = COALESCE(?, username),
             seen = ?,
+            first_seen = CASE WHEN first_seen = 0 THEN ? ELSE first_seen END,
+            incoming = incoming + CASE WHEN ? THEN 0 ELSE 1 END,
             owner_seen = CASE WHEN ? THEN ? ELSE owner_seen END
         WHERE owner_id = ? AND chat_id = ?
         """,
-        (title, username, now, int(from_owner), now, owner_id, chat_id),
+        (
+            title,
+            username,
+            now,
+            now,
+            int(from_owner),
+            int(from_owner),
+            now,
+            owner_id,
+            chat_id,
+        ),
     )
     return await chat_of(owner_id, chat_id)
+
+
+async def bump_chat(owner_id: int, chat_id: int, field: str, by: int = 1) -> None:
+    """Счётчики поведения собеседника: удаления, правки, срабатывания фильтра.
+
+    Из них собирается карточка «сколько раз этот человек удалял у вас
+    сообщения» — то, чего не даёт ни один чужой бот, потому что для
+    этого нужно вести историю, а не просто пересылать событие.
+    """
+    if field not in ("deleted", "edited", "flagged", "replies", "incoming"):
+        raise ValueError(f"счётчика {field!r} нет")
+    await chat_of(owner_id, chat_id)
+    await _run(
+        f"UPDATE chats SET {field} = {field} + ? WHERE owner_id = ? AND chat_id = ?",
+        (by, owner_id, chat_id),
+    )
+
+
+async def set_muted(owner_id: int, chat_id: int, muted: bool) -> None:
+    await chat_of(owner_id, chat_id)
+    await _run(
+        "UPDATE chats SET muted = ? WHERE owner_id = ? AND chat_id = ?",
+        (int(muted), owner_id, chat_id),
+    )
+
+
+async def set_trusted(owner_id: int, chat_id: int, trusted: bool) -> None:
+    """Пометить чат доверенным — антискам его больше не проверяет.
+
+    Нужно ровно для одного случая: фильтр ошибся, и владелец нажал «это
+    не спам». Без такой кнопки единственным способом договориться с
+    фильтром остаётся его отключение целиком.
+    """
+    await chat_of(owner_id, chat_id)
+    await _run(
+        "UPDATE chats SET trusted = ? WHERE owner_id = ? AND chat_id = ?",
+        (int(trusted), owner_id, chat_id),
+    )
+
+
+async def set_note(owner_id: int, chat_id: int, note: str | None) -> None:
+    await chat_of(owner_id, chat_id)
+    await _run(
+        "UPDATE chats SET note = ? WHERE owner_id = ? AND chat_id = ?",
+        (note, owner_id, chat_id),
+    )
+
+
+# --------------------------------------------------------------------------
+# Сохранённый профиль владельца и шаблоны
+# --------------------------------------------------------------------------
+
+
+async def save_profile(
+    owner_id: int,
+    *,
+    first_name: str | None,
+    last_name: str | None,
+    bio: str | None,
+    photo_id: str | None,
+) -> None:
+    """Запомнить профиль перед клонированием, чтобы было куда вернуться."""
+    await _run(
+        """
+        INSERT INTO profiles (owner_id, first_name, last_name, bio, photo_id, saved_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(owner_id) DO UPDATE SET
+            first_name = excluded.first_name,
+            last_name = excluded.last_name,
+            bio = excluded.bio,
+            photo_id = excluded.photo_id,
+            saved_at = excluded.saved_at
+        """,
+        (owner_id, first_name, last_name, bio, photo_id, int(time.time())),
+    )
+
+
+async def profile_of(owner_id: int) -> aiosqlite.Row | None:
+    return await _one("SELECT * FROM profiles WHERE owner_id = ?", (owner_id,))
+
+
+async def set_snip(owner_id: int, name: str, body: str) -> None:
+    await _run(
+        """
+        INSERT INTO snips (owner_id, name, body) VALUES (?, ?, ?)
+        ON CONFLICT (owner_id, name) DO UPDATE SET body = excluded.body
+        """,
+        (owner_id, name.lower(), body),
+    )
+
+
+async def snip_of(owner_id: int, name: str) -> aiosqlite.Row | None:
+    row = await _one(
+        "SELECT * FROM snips WHERE owner_id = ? AND name = ?", (owner_id, name.lower())
+    )
+    if row is not None:
+        await _run(
+            "UPDATE snips SET used = used + 1 WHERE owner_id = ? AND name = ?",
+            (owner_id, name.lower()),
+        )
+    return row
+
+
+async def snips_of(owner_id: int) -> list[aiosqlite.Row]:
+    return await _all(
+        "SELECT * FROM snips WHERE owner_id = ? ORDER BY used DESC, name", (owner_id,)
+    )
+
+
+async def drop_snip(owner_id: int, name: str) -> None:
+    await _run(
+        "DELETE FROM snips WHERE owner_id = ? AND name = ?", (owner_id, name.lower())
+    )
+
+
+# --------------------------------------------------------------------------
+# Счёт игр
+# --------------------------------------------------------------------------
+
+
+async def bump_score(owner_id: int, chat_id: int, game: str, result: str) -> None:
+    column = {"win": "wins", "loss": "losses", "draw": "draws"}.get(result)
+    if column is None:
+        raise ValueError(f"результат {result!r} неизвестен")
+    await _run(
+        f"""
+        INSERT INTO scores (owner_id, chat_id, game, {column})
+        VALUES (?, ?, ?, 1)
+        ON CONFLICT (owner_id, chat_id, game) DO UPDATE SET
+            {column} = {column} + 1
+        """,
+        (owner_id, chat_id, game),
+    )
+
+
+async def score_of(owner_id: int, chat_id: int, game: str) -> dict[str, int]:
+    row = await _one(
+        "SELECT wins, losses, draws FROM scores "
+        "WHERE owner_id = ? AND chat_id = ? AND game = ?",
+        (owner_id, chat_id, game),
+    )
+    if row is None:
+        return {"wins": 0, "losses": 0, "draws": 0}
+    return {"wins": row["wins"], "losses": row["losses"], "draws": row["draws"]}
+
+
+async def scores_of(owner_id: int, chat_id: int) -> list[aiosqlite.Row]:
+    return await _all(
+        "SELECT * FROM scores WHERE owner_id = ? AND chat_id = ? ORDER BY game",
+        (owner_id, chat_id),
+    )
 
 
 async def mark_reply(owner_id: int, chat_id: int, rule_id: int | None) -> None:
