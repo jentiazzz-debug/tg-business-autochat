@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -75,26 +75,59 @@ class Form(StatesGroup):
 # --------------------------------------------------------------------------
 
 
+#: Предел подписи к фото в Telegram. Экран длиннее уходит текстом:
+#: подпись такой длины Telegram просто не принимает.
+CAPTION_LIMIT = 1024
+
+
 async def _show(
-    event: Message | CallbackQuery, text: str, markup: InlineKeyboardMarkup
+    event: Message | CallbackQuery,
+    text: str,
+    markup: InlineKeyboardMarkup,
+    *,
+    photo: str | None = None,
 ) -> None:
-    """Перерисовать панель на месте или отправить новую."""
+    """Перерисовать панель на месте или отправить новую.
+
+    Баннер усложняет ровно одно место: сообщение с фотографией нельзя
+    правкой превратить в текстовое и наоборот. Поэтому при переходе
+    между экраном с картинкой и экраном без неё прежнее сообщение
+    удаляется и отправляется новое — иначе Telegram отвечает ошибкой, а
+    панель остаётся на прошлом экране.
+    """
+    want_photo = bool(photo) and len(text) <= CAPTION_LIMIT
+
     if isinstance(event, CallbackQuery):
         message = event.message
         if message is not None:
-            try:
-                await message.edit_text(text, reply_markup=markup)
-                return
-            except TelegramBadRequest as err:
-                # «message is not modified» — нормальная ситуация: нажали
-                # ту же кнопку дважды. Всё остальное (сообщение слишком
-                # старое для правки) лечится новой отправкой.
-                if "not modified" in str(err):
+            has_photo = bool(message.photo)
+            if want_photo == has_photo:
+                try:
+                    if want_photo:
+                        await message.edit_caption(caption=text, reply_markup=markup)
+                    else:
+                        await message.edit_text(text, reply_markup=markup)
                     return
+                except TelegramBadRequest as err:
+                    # «message is not modified» — нажали ту же кнопку
+                    # дважды, это нормально.
+                    if "not modified" in str(err):
+                        return
+            try:
+                await message.delete()
+            except TelegramAPIError:
+                pass
+            if want_photo:
+                await message.answer_photo(photo, caption=text, reply_markup=markup)
+            else:
                 await message.answer(text, reply_markup=markup)
-                return
+            return
+
     if isinstance(event, Message):
-        await event.answer(text, reply_markup=markup)
+        if want_photo:
+            await event.answer_photo(photo, caption=text, reply_markup=markup)
+        else:
+            await event.answer(text, reply_markup=markup)
 
 
 async def root(event: Message | CallbackQuery, bot: Bot, owner_id: int) -> None:

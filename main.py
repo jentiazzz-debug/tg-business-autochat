@@ -17,8 +17,9 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramRetryAfter
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, BotCommandScopeChat
 
+import admin
 import business
 import config
 import db
@@ -111,6 +112,10 @@ async def run() -> None:
     # панелью не пересекается, но так порядок читается сверху вниз —
     # сначала работа, потом настройки.
     dispatcher.include_router(business.router)
+    # Админский роутер идёт раньше панели: у панели есть широкий
+    # обработчик любого текста в личке, и он перехватывал бы то, что
+    # админ вводит в мастере рассылки.
+    dispatcher.include_router(admin.router)
     dispatcher.include_router(handlers.router)
     if config.ALLOWED_IDS:
         # Последним: сюда попадают только те, кого отсеял фильтр панели.
@@ -138,6 +143,24 @@ async def run() -> None:
     await bot.set_my_commands(
         [BotCommand(command=name, description=text) for name, text in COMMANDS]
     )
+    # Админам /admin виден в меню, остальным его там нет: команда всё
+    # равно не сработает, а лишний пункт в списке вызывает вопросы.
+    admin_menu = [BotCommand(command=name, description=text) for name, text in COMMANDS]
+    admin_menu.insert(0, BotCommand(command="admin", description="Админка бота"))
+    for admin_id in config.ADMIN_IDS:
+        try:
+            await bot.set_my_commands(
+                admin_menu, scope=BotCommandScopeChat(chat_id=admin_id)
+            )
+        except Exception as err:  # noqa: BLE001
+            log.warning("не выставил меню админу %s: %s", admin_id, err)
+    if config.ADMIN_IDS:
+        log.info("админы бота: %s", sorted(config.ADMIN_IDS))
+    else:
+        log.info(
+            "ADMIN_IDS пуст — админки нет ни у кого. Впиши свой id, чтобы "
+            "открыть /admin: статистику, баннер меню и рассылку."
+        )
 
     janitor = asyncio.create_task(cleanup())
     try:

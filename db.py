@@ -104,6 +104,24 @@ CREATE TABLE IF NOT EXISTS chats (
 );
 CREATE INDEX IF NOT EXISTS chats_seen ON chats (owner_id, seen);
 
+CREATE TABLE IF NOT EXISTS bot_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS broadcasts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    admin_id    INTEGER NOT NULL,
+    started_at  INTEGER NOT NULL,
+    finished_at INTEGER,
+    total       INTEGER NOT NULL DEFAULT 0,
+    sent        INTEGER NOT NULL DEFAULT 0,
+    failed      INTEGER NOT NULL DEFAULT 0,
+    blocked     INTEGER NOT NULL DEFAULT 0,
+    preview     TEXT
+);
+CREATE INDEX IF NOT EXISTS broadcasts_at ON broadcasts (started_at);
+
 CREATE TABLE IF NOT EXISTS profiles (
     owner_id   INTEGER PRIMARY KEY,
     first_name TEXT,
@@ -184,6 +202,9 @@ SETTING_FIELDS = (
     "filter_files",
     "notify_new",
 )
+
+#: Ключ баннера главного меню в bot_meta.
+BANNER_KEY = "menu_banner"
 
 _db: aiosqlite.Connection | None = None
 
@@ -563,6 +584,128 @@ async def set_note(owner_id: int, chat_id: int, note: str | None) -> None:
     await _run(
         "UPDATE chats SET note = ? WHERE owner_id = ? AND chat_id = ?",
         (note, owner_id, chat_id),
+    )
+
+
+# --------------------------------------------------------------------------
+# Настройки самого бота и рассылки
+# --------------------------------------------------------------------------
+
+
+async def meta_get(key: str, default: str | None = None) -> str | None:
+    row = await _one("SELECT value FROM bot_meta WHERE key = ?", (key,))
+    return row["value"] if row else default
+
+
+async def meta_set(key: str, value: str | None) -> None:
+    if value is None:
+        await _run("DELETE FROM bot_meta WHERE key = ?", (key,))
+        return
+    await _run(
+        "INSERT INTO bot_meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+
+
+async def owner_chats() -> list[int]:
+    """Кому уходит рассылка: все, кто открывал бота или подключал его.
+
+    Личный чат человека с ботом имеет тот же id, что и сам человек,
+    поэтому owner_id из настроек — уже готовый адрес. Подключения
+    добавляются отдельно: там Telegram присылает user_chat_id, и он
+    может отличаться, если бота подключили, ни разу не открыв.
+    """
+    rows = await _all(
+        """
+        SELECT owner_id AS chat FROM settings
+        UNION
+        SELECT user_chat_id AS chat FROM connections
+        """
+    )
+    return [int(r["chat"]) for r in rows if r["chat"]]
+
+
+async def global_stats() -> dict[str, Any]:
+    """Сводка по всему боту — для админской панели."""
+    now = int(time.time())
+
+    async def one(sql: str, args: Iterable[Any] = ()) -> int:
+        row = await _one(sql, args)
+        return int(row["n"] or 0) if row else 0
+
+    return {
+        "owners": await one("SELECT COUNT(*) AS n FROM settings"),
+        "connected": await one(
+            "SELECT COUNT(DISTINCT owner_id) AS n FROM connections WHERE enabled = 1"
+        ),
+        "connections": await one("SELECT COUNT(*) AS n FROM connections"),
+        "new_week": await one(
+            "SELECT COUNT(*) AS n FROM connections WHERE created_at >= ?",
+            (now - 7 * 86400,),
+        ),
+        "chats": await one("SELECT COUNT(*) AS n FROM chats WHERE seen > 0"),
+        "rules": await one("SELECT COUNT(*) AS n FROM rules"),
+        "replies_day": await one(
+            "SELECT COUNT(*) AS n FROM log WHERE at >= ?", (now - 86400,)
+        ),
+        "replies_week": await one(
+            "SELECT COUNT(*) AS n FROM log WHERE at >= ?", (now - 7 * 86400,)
+        ),
+        "replies_all": await one("SELECT COUNT(*) AS n FROM log"),
+        "archive": await one("SELECT COUNT(*) AS n FROM messages"),
+        "caught_deleted": await one("SELECT SUM(deleted) AS n FROM chats"),
+        "caught_edited": await one("SELECT SUM(edited) AS n FROM chats"),
+        "flagged": await one("SELECT SUM(flagged) AS n FROM chats"),
+        "muted": await one("SELECT COUNT(*) AS n FROM chats WHERE muted = 1"),
+        "games": await one("SELECT SUM(wins + losses + draws) AS n FROM scores"),
+        "snips": await one("SELECT COUNT(*) AS n FROM snips"),
+    }
+
+
+async def top_owners(limit: int = 5) -> list[aiosqlite.Row]:
+    """Самые активные владельцы — по числу автоответов."""
+    return await _all(
+        """
+        SELECT l.owner_id, COUNT(*) AS n,
+               (SELECT name FROM connections c WHERE c.owner_id = l.owner_id
+                ORDER BY updated_at DESC LIMIT 1) AS name
+        FROM log l
+        GROUP BY l.owner_id
+        ORDER BY n DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+
+
+async def start_broadcast(admin_id: int, total: int, preview: str) -> int:
+    cur = await _conn().execute(
+        """
+        INSERT INTO broadcasts (admin_id, started_at, total, preview)
+        VALUES (?, ?, ?, ?)
+        """,
+        (admin_id, int(time.time()), total, preview[:200]),
+    )
+    await _conn().commit()
+    return int(cur.lastrowid or 0)
+
+
+async def finish_broadcast(
+    broadcast_id: int, *, sent: int, failed: int, blocked: int
+) -> None:
+    await _run(
+        """
+        UPDATE broadcasts SET finished_at = ?, sent = ?, failed = ?, blocked = ?
+        WHERE id = ?
+        """,
+        (int(time.time()), sent, failed, blocked, broadcast_id),
+    )
+
+
+async def last_broadcasts(limit: int = 5) -> list[aiosqlite.Row]:
+    return await _all(
+        "SELECT * FROM broadcasts ORDER BY started_at DESC LIMIT ?", (limit,)
     )
 
 
