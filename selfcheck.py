@@ -525,6 +525,63 @@ def subs_checks() -> None:
     check("подписка: стена, кэш, «Я подписался», отказ Telegram", not fails, "; ".join(fails))
 
 
+def send_file_checks() -> None:
+    """Картинка в чат: обход BUSINESS_CONNECTION_INVALID через личку."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from aiogram.exceptions import TelegramBadRequest
+
+    from cmdbase import Ctx
+
+    print("\n=== КАРТИНКИ В ЧАТ ===")
+
+    class FakeBot:
+        def __init__(self, upload_ok: bool, by_id_ok: bool) -> None:
+            self.upload_ok, self.by_id_ok = upload_ok, by_id_ok
+            self.log: list[str] = []
+
+        async def send_photo(self, chat_id, photo, business_connection_id=None):
+            by_id = isinstance(photo, str)
+            if business_connection_id:
+                ok = self.by_id_ok if by_id else self.upload_ok
+                self.log.append(("chat-id" if by_id else "chat-upload") + (":ok" if ok else ":fail"))
+                if not ok:
+                    raise TelegramBadRequest(method=None, message="BUSINESS_CONNECTION_INVALID")
+                return SimpleNamespace()
+            self.log.append("dm-upload")
+            bot = self
+
+            async def delete():
+                bot.log.append("dm-deleted")
+
+            return SimpleNamespace(photo=[SimpleNamespace(file_id="F")], sticker=None, delete=delete)
+
+        async def send_message(self, chat_id, text, **kw):
+            self.log.append("dm-note")
+
+    async def run(upload_ok: bool, by_id_ok: bool) -> tuple[bool, list[str]]:
+        bot = FakeBot(upload_ok, by_id_ok)
+        ctx = Ctx(bot=bot, conn_id="c", owner_id=1, owner_chat_id=1, chat_id=2,
+                  message=None, args="", settings={})
+        return await ctx.send_file("photo", b"jpg", "p.jpg"), bot.log
+
+    ok, log = asyncio.run(run(True, True))
+    check("картинка уходит в чат сразу", ok and log == ["chat-upload:ok"], str(log))
+    ok, log = asyncio.run(run(False, True))
+    check(
+        "отказ загрузки — обход через личку, копия убрана",
+        ok and log == ["chat-upload:fail", "dm-upload", "chat-id:ok", "dm-deleted"],
+        str(log),
+    )
+    ok, log = asyncio.run(run(False, False))
+    check(
+        "совсем не вышло — картинка остаётся в личке без ⚠️",
+        not ok and log == ["chat-upload:fail", "dm-upload", "chat-id:fail", "dm-note"],
+        str(log),
+    )
+
+
 def main() -> int:
     autoreply_checks()
     guard_checks()
@@ -536,6 +593,7 @@ def main() -> int:
     storage_checks()
     db_checks()
     subs_checks()
+    send_file_checks()
     print()
     if FAILED:
         print(f"ПРОВАЛЕНО {len(FAILED)}:")

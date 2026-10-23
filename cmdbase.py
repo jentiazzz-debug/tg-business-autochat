@@ -156,6 +156,54 @@ class Ctx:
             log.warning("не отправил результат команды в %s: %s", self.chat_id, err)
             return None
 
+    async def send_file(self, kind: str, data: bytes, filename: str) -> bool:
+        """Отправить картинку или стикер в чат от имени владельца.
+
+        Загрузка файла через бизнес-подключение у Telegram капризнее
+        текста: бывает, текст уходит, а sendPhoto с файлом получает
+        BUSINESS_CONNECTION_INVALID. Поэтому три ступени:
+
+        1. загрузить прямо в чат;
+        2. не вышло — загрузить владельцу в личку бота и переслать в чат
+           уже готовым file_id, без новой загрузки;
+        3. и это не вышло — файл остаётся у владельца в личке с короткой
+           подписью. Без ⚠️ и текста ошибки: результат команды у него на
+           руках, а причина — в логе.
+
+        True — файл попал в чат.
+        """
+        from aiogram.types import BufferedInputFile
+
+        method = self.bot.send_sticker if kind == "sticker" else self.bot.send_photo
+        try:
+            await method(self.chat_id, BufferedInputFile(data, filename=filename),
+                         business_connection_id=self.conn_id)
+            return True
+        except TelegramAPIError as err:
+            log.info("файл в чат %s не загрузился (%s) — пробую через личку", self.chat_id, err)
+
+        try:
+            mine = await method(self.owner_chat_id, BufferedInputFile(data, filename=filename))
+        except TelegramAPIError as err:
+            log.warning("файл не загрузился и в личку владельцу %s: %s", self.owner_id, err)
+            return False
+        file_id = mine.sticker.file_id if kind == "sticker" and mine.sticker else (
+            mine.photo[-1].file_id if mine.photo else None
+        )
+        if file_id:
+            try:
+                await method(self.chat_id, file_id, business_connection_id=self.conn_id)
+                # В чат ушло — копия в личке больше не нужна.
+                try:
+                    await mine.delete()
+                except TelegramAPIError:
+                    pass
+                return True
+            except TelegramAPIError as err:
+                log.info("и по file_id в чат %s не ушло: %s", self.chat_id, err)
+        await self.to_owner("В чат Telegram отправить не дал — держите здесь, можно переслать.")
+        return False
+
     async def replace(self, text: str, *, html: bool = False, **kw: Any) -> Message | None:
         """Подменить команду результатом — основной приём всех команд."""
         await self.drop_command()

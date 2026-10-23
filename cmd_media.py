@@ -16,7 +16,6 @@ import logging
 from typing import Callable
 
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import BufferedInputFile
 
 from cmdbase import Ctx, command
 
@@ -88,14 +87,7 @@ def _make(effect: Callable[[bytes], bytes], caption: str):
             await ctx.fail("картинка не обработалась — возможно, битый файл")
             return
         await ctx.drop_command()
-        try:
-            await ctx.bot.send_photo(
-                chat_id=ctx.chat_id,
-                photo=BufferedInputFile(result, filename="p.jpg"),
-                business_connection_id=ctx.conn_id,
-            )
-        except TelegramAPIError as err:
-            await ctx.to_owner(f"⚠️ картинка не отправилась: {err}")
+        await ctx.send_file("photo", result, "p.jpg")
 
     return run
 
@@ -129,18 +121,4 @@ async def cmd_sticker(ctx: Ctx) -> None:
         await ctx.fail(f"не собрался стикер: {err}")
         return
     await ctx.drop_command()
-    try:
-        await ctx.bot.send_sticker(
-            chat_id=ctx.chat_id,
-            sticker=BufferedInputFile(webp, filename="s.webp"),
-            business_connection_id=ctx.conn_id,
-        )
-    except TelegramAPIError as err:
-        # Telegram придирчив к стикерам-файлам: если не принял, отдаём
-        # ту же картинку обычным фото, чтобы команда не осталась ни с чем.
-        log.info("стикер не принят (%s), отправляю фото", err)
-        await ctx.bot.send_photo(
-            chat_id=ctx.chat_id,
-            photo=BufferedInputFile(webp, filename="s.webp"),
-            business_connection_id=ctx.conn_id,
-        )
+    await ctx.send_file("sticker", webp, "s.webp")
