@@ -127,29 +127,6 @@ REPLY_KINDS = {
 # Знакомство
 # --------------------------------------------------------------------------
 
-START = (
-    f"{e('solutions')} <b>{BRAND}</b>\n"
-    "<i>выходит на площадку вместо вас</i>\n\n"
-    "Бот подключается к вашему Telegram Business и работает прямо в "
-    "ваших личных чатах:\n\n"
-    f"{e('trash')} <b>Сохраняет удалённое</b> — собеседник стёр сообщение, "
-    "а вы всё равно видите текст, фото, голосовое или кружок.\n"
-    f"{e('edit')} <b>Ловит правки</b> — было → стало.\n"
-    f"{e('shield')} <b>Антискам</b> — разбирает первые сообщения от "
-    "незнакомых и объясняет, почему счёл их спамом.\n"
-    f"{e('chat')} <b>Отвечает за вас</b> — правила «слова → ответ», режим "
-    "«отошёл», приветствие новым.\n"
-    f"{e('code')} <b>{{commands}} команд</b> прямо в переписке: мут, досье, "
-    "игры, стили текста, напоминания.\n\n"
-    f"{e('link')} <b>Как подключить</b>\n"
-    f"{e('num1')} Настройки Telegram → <b>Telegram для бизнеса</b>\n"
-    f"{e('num2')} <b>Автоматизация чатов</b> → вставьте <code>@{{bot}}</code>\n"
-    f"{e('num3')} Выдайте права — что разрешите, то и заработает\n\n"
-    f"{e('star')} <i>Нужен Telegram Premium: без него раздела «для бизнеса» "
-    "в настройках нет.</i>"
-)
-
-
 def connected(rights: Mapping[str, bool], st: Mapping[str, Any]) -> str:
     """Что сказать сразу после подключения."""
     from cmdbase import RIGHT_TITLES
@@ -197,23 +174,6 @@ NOT_ALLOWED = (
     "ссылку."
 )
 
-NO_REPLY_RIGHT = (
-    f"{e('warning')} Боту не выдано право отвечать в чатах. Откройте «Автоматизация "
-    "чатов» и включите разрешение отвечать — иначе он сможет только "
-    "следить за удалённым."
-)
-
-
-def no_connection(bot_username: str) -> str:
-    return (
-        f"{e('warning')} <b>Бот пока не подключён к вашим чатам.</b>\n\n"
-        "Настройки Telegram → <b>Telegram для бизнеса</b> → "
-        f"<b>Автоматизация чатов</b> → вставьте <code>@{bot_username}</code>.\n\n"
-        "Настройки ниже можно задать заранее — они применятся сразу "
-        "после подключения."
-    )
-
-
 # --------------------------------------------------------------------------
 # Панель
 # --------------------------------------------------------------------------
@@ -221,6 +181,7 @@ def no_connection(bot_username: str) -> str:
 
 def panel(
     *,
+    bot_name: str,
     bot_username: str,
     conn: Mapping[str, Any] | None,
     st: Mapping[str, Any],
@@ -230,57 +191,84 @@ def panel(
     chats: int,
     commands_total: int,
 ) -> str:
-    """Главный экран. Одна строка на раздел, состояние видно сразу."""
+    """Главный экран — подпись под баннером, поэтому коротко.
+
+    Не подключён — что умеет и как подключить, в три шага. Подключён —
+    одна строка состояния в цитате и по строке на раздел. Паузы,
+    тексты и сводка живут в «Настройках», здесь им не место.
+    """
+    head = f"{e('solutions')} <b>{esc(bot_name)}</b>"
+
     if conn is None:
-        status = "не подключён"
-    elif not conn["enabled"]:
-        status = "подключение отключено в Telegram"
+        return "\n".join(
+            (
+                head,
+                "",
+                "<blockquote>Видит, что собеседник удалил или переписал, "
+                "режет спам и отвечает за вас — прямо в ваших личных "
+                "чатах.</blockquote>",
+                "",
+                f"{e('trash')} удалённые сообщения, фото и голосовые",
+                f"{e('edit')} правки: было → стало",
+                f"{e('shield')} антискам с объяснением",
+                f"{e('code')} {commands_total} команд в переписке",
+                "",
+                f"{e('link')} <b>Подключение</b>",
+                f"{e('num1')} Настройки → <b>Telegram для бизнеса</b>",
+                f"{e('num2')} <b>Автоматизация чатов</b> → <code>@{esc(bot_username)}</code>",
+                f"{e('num3')} Разрешите всё, что предложит Telegram",
+                "",
+                f"<i>Нужен Telegram Premium.</i>",
+            )
+        )
+
+    if not conn["enabled"]:
+        state = f"{e('power')} Подключение отключено в Telegram"
     elif not conn["can_reply"]:
-        status = "подключён, но без права отвечать"
+        state = f"{e('warning')} Нет права отвечать — включите в «Автоматизации чатов»"
+    elif st["away"]:
+        state = f"{e('pause')} Вы «отошли» — бот отвечает за вас"
     else:
-        status = f"на площадке · {chats} {plural(chats, 'чат', 'чата', 'чатов')}"
+        where = f"{chats} {plural(chats, 'чате', 'чатах', 'чатах')}" if chats else "ваших чатах"
+        state = f"{e('on')} Работает в {where}"
 
-    if st["away"]:
-        mode = f"{e('pause')} отошёл"
-    elif st["active"]:
-        mode = f"{e('on')} в работе"
-    else:
-        mode = f"{e('off')} молчит"
-
-    rules_note = (
-        f"{active_rules} из {rules}" if rules else "нет ни одного"
-    )
-    filter_note = (
-        f"порог {st['filter_score']} · "
-        + ("удаляет" if st["filter_delete"] else "только сообщает")
+    trace = f"{archive} в архиве" if st["spy"] else "выключен"
+    guard = (
+        ("удаляет" if st["filter_delete"] else "сообщает") + f", порог {st['filter_score']}"
         if st["filter_on"]
         else "выключен"
     )
-    trace_note = (
-        f"{archive} в архиве · {st['keep_days']} дн."
-        if st["spy"]
-        else "выключен"
-    )
-    cmd_note = (
-        f"{commands_total} · префикс «{st['prefix']}»"
-        if st["commands"]
-        else "выключены"
-    )
+    if not st["active"]:
+        replies = "выключены"
+    elif rules:
+        replies = f"{active_rules} {plural(active_rules, 'правило', 'правила', 'правил')}"
+    else:
+        replies = "правил нет"
+    cmds = f"префикс «{esc(st['prefix'])}»" if st["commands"] else "выключены"
 
     return "\n".join(
         (
-            f"{e('solutions')} <b>{BRAND}</b>",
-            f"<i>{status}</i>",
+            head,
+            f"<blockquote>{state}</blockquote>",
             "",
-            f"<b>{mode}</b>",
-            LINE,
-            f"{e('trash')} <b>След</b> · {trace_note}",
-            f"{e('shield')} <b>Антискам</b> · {filter_note}",
-            f"{e('chat')} <b>Автоответы</b> · правил {rules_note}",
-            f"{e('code')} <b>Команды</b> · {cmd_note}",
-            LINE,
-            f"{e('pending')} пауза после вашего ответа — {mins(st['pause_minutes'])}",
-            f"{e('clock')} между автоответами — {secs(st['cooldown'])}",
+            f"{e('trash')} <b>След</b> — {trace}",
+            f"{e('shield')} <b>Антискам</b> — {guard}",
+            f"{e('chat')} <b>Автоответы</b> — {replies}",
+            f"{e('code')} <b>Команды</b> — {cmds}",
+        )
+    )
+
+
+def settings_card(st: Mapping[str, Any]) -> str:
+    return "\n".join(
+        (
+            f"{e('gear')} <b>Настройки</b>",
+            "",
+            f"{e('edit')} <b>Тексты</b> — «отошёл», приветствие, ответ по умолчанию",
+            f"{e('timer')} <b>Паузы</b> — {mins(st['pause_minutes'])} после вашего "
+            f"ответа, {secs(st['cooldown'])} между ответами",
+            f"{e('chats')} <b>Диалоги</b> — где бот молчит, кто в муте",
+            f"{e('bar_chart')} <b>Сводка</b> — сколько ответил и поймал",
         )
     )
 

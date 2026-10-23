@@ -37,6 +37,8 @@ ICONS: dict[str, tuple[str, str]] = {
 }
 
 _TAG = re.compile(r'<tg-emoji emoji-id="\d+">(.*?)</tg-emoji>', re.S)
+_TAG_ID = re.compile(r'<tg-emoji emoji-id="(\d+)">(.*?)</tg-emoji>', re.S)
+_BY_ID = {icon[0]: name for name, icon in ICONS.items()}
 
 
 def e(name: str) -> str:
@@ -60,6 +62,24 @@ def id_of(name: str) -> str:
 def strip(text: str) -> str:
     """Заменить все <tg-emoji> их заменителями."""
     return _TAG.sub(r"\1", text)
+
+
+#: Иконки, которые и без премиума несут смысл: «в муте» без 🔇 — просто
+#: фраза. Остальные заменители — цветные 🔘 💻 ✅ — превращают монохромный
+#: экран в пестроту, поэтому при отказе Telegram они просто убираются.
+KEEP_PLAIN = {"mute", "volume", "warning"}
+
+
+def drop(text: str) -> str:
+    """Убрать иконки совсем (кроме KEEP_PLAIN) — вид без премиума."""
+
+    def one(match: re.Match) -> str:
+        name = _BY_ID.get(match.group(1))
+        return match.group(2) if name in KEEP_PLAIN else ""
+
+    text = _TAG_ID.sub(one, text)
+    # «<icon> Текст» без иконки оставит пробел в начале строки.
+    return re.sub(r"(^|\n|>) +", r"\1", text)
 
 
 # --------------------------------------------------------------------------
@@ -93,7 +113,7 @@ def _plain_method(method: Any) -> Any:
     for field in _TEXT_FIELDS:
         value = getattr(method, field, None)
         if isinstance(value, str) and "<tg-emoji" in value:
-            update[field] = strip(value)
+            update[field] = drop(value)
     markup = getattr(method, "reply_markup", None)
     rows = getattr(markup, "inline_keyboard", None)
     if rows:

@@ -57,20 +57,34 @@ def _mark(flag: Any) -> str:
 def root(st: Mapping[str, Any], *, mirrors_on: bool = False) -> InlineKeyboardMarkup:
     """Главный экран панели. mirrors_on — кнопка зеркал (только основной бот)."""
     kb = InlineKeyboardBuilder()
-    _b(kb, _mark(st["active"]), "Автоответы", callback_data="t:active")
-    _b(kb, "pause" if st["away"] else "play", "Отошёл", callback_data="t:away")
     _b(kb, "trash", "След", callback_data="m:trace")
     _b(kb, "shield", "Антискам", callback_data="m:guard")
-    _b(kb, "checklist", "Правила", callback_data="m:rules")
+    _b(kb, "chat", "Автоответы", callback_data="m:rules")
     _b(kb, "code", "Команды", callback_data="m:cmds")
+    if st["away"]:
+        _b(kb, "play", "Я вернулся", callback_data="t:away")
+    else:
+        _b(kb, "pause", "Я отошёл", callback_data="t:away")
+    _b(kb, "gear", "Настройки", callback_data="m:more")
+    sizes = [2, 2, 2]
+    if mirrors_on:
+        _b(kb, "rocket", "Своё зеркало бота", callback_data="mr:home")
+        sizes.append(1)
+    kb.adjust(*sizes)
+    return kb.as_markup()
+
+
+def more(st: Mapping[str, Any]) -> InlineKeyboardMarkup:
+    """Второстепенное — то, что раньше теснилось на главном экране."""
+    kb = InlineKeyboardBuilder()
+    _b(kb, _mark(st["active"]), "Автоответы вкл." if st["active"] else "Автоответы выкл.", callback_data="t:active")
     _b(kb, "edit", "Тексты", callback_data="m:texts")
     _b(kb, "timer", "Паузы", callback_data="m:time")
     _b(kb, "chats", "Диалоги", callback_data="m:chats")
     _b(kb, "bar_chart", "Сводка", callback_data="m:stats")
     _b(kb, "faq", "Как это работает", callback_data="m:how")
-    if mirrors_on:
-        _b(kb, "rocket", "Своё зеркало бота", callback_data="mr:home")
-    kb.adjust(2, 2, 2, 2, 2, 1, 1)
+    _b(kb, "back", "Назад", callback_data="m:root")
+    kb.adjust(1, 2, 2, 1, 1)
     return kb.as_markup()
 
 
@@ -128,7 +142,7 @@ def texts_menu(st: Mapping[str, Any]) -> InlineKeyboardMarkup:
     _b(kb, "edit", "Текст приветствия", callback_data="e:greet_text")
     _b(kb, _mark(st["fallback"]), "Ответ по умолчанию", callback_data="t:fallback")
     _b(kb, "edit", "Текст по умолчанию", callback_data="e:fallback_text")
-    _b(kb, "back", "Назад", callback_data="m:root")
+    _b(kb, "back", "Назад", callback_data="m:more")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -163,7 +177,7 @@ def timings(st: Mapping[str, Any]) -> InlineKeyboardMarkup:
     tail.adjust(3, 3)
     kb.attach(tail)
     end = InlineKeyboardBuilder()
-    _b(end, "back", "Назад", callback_data="m:root")
+    _b(end, "back", "Назад", callback_data="m:more")
     kb.attach(end)
     return kb.as_markup()
 
@@ -268,7 +282,7 @@ def chats(items: Sequence[Mapping[str, Any]]) -> InlineKeyboardMarkup:
         )
     kb.adjust(1)
     tail = InlineKeyboardBuilder()
-    _b(tail, "back", "Назад", callback_data="m:root")
+    _b(tail, "back", "Назад", callback_data="m:more")
     kb.attach(tail)
     return kb.as_markup()
 

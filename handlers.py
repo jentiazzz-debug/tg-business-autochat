@@ -243,6 +243,7 @@ async def root(event: Message | CallbackQuery, bot: Bot, owner_id: int) -> None:
     stats = await db.stats_of(owner_id)
     me = await bot.me()
     text = texts.panel(
+        bot_name=me.first_name or texts.BRAND,
         bot_username=me.username or "bot",
         conn=conn,
         st=st,
@@ -252,10 +253,6 @@ async def root(event: Message | CallbackQuery, bot: Bot, owner_id: int) -> None:
         chats=stats["chats"],
         commands_total=commands.count(),
     )
-    if conn is None:
-        text += "\n\n" + texts.no_connection(me.username or "bot")
-    elif conn["enabled"] and not conn["can_reply"]:
-        text += "\n\n" + texts.NO_REPLY_RIGHT
     markup = keyboards.root(st, mirrors_on=mirrors.is_main(bot) and config.MIRRORS_PER_OWNER > 0)
     await _show(event, text, markup, photo=await banner_for(bot))
 
@@ -279,12 +276,8 @@ def _group_counts() -> list[tuple[str, str, int]]:
 @router.message(Command("start", "menu"), StateFilter(None))
 async def cmd_start(message: Message, bot: Bot) -> None:
     owner_id = message.from_user.id
-    conn = await db.connection_of(owner_id, bot.id)
-    if conn is None:
-        me = await bot.me()
-        await message.answer(
-            texts.START.format(bot=me.username or "bot", commands=commands.count())
-        )
+    # Одно сообщение: баннер и под ним всё нужное. Отдельное длинное
+    # приветствие перед панелью только засоряло чат.
     await root(message, bot, owner_id)
 
 
@@ -381,6 +374,8 @@ async def on_menu(call: CallbackQuery, bot: Bot, state: FSMContext) -> None:
     elif screen == "rules":
         rules = await db.rules_of(owner_id)
         await _show(call, texts.rules_list(rules), keyboards.rules(rules))
+    elif screen == "more":
+        await _show(call, texts.settings_card(st), keyboards.more(st))
     elif screen == "texts":
         await _show(call, texts.texts_card(st), keyboards.texts_menu(st))
     elif screen == "time":
@@ -402,12 +397,12 @@ async def on_menu(call: CallbackQuery, bot: Bot, state: FSMContext) -> None:
     elif screen == "stats":
         data = await db.stats_of(owner_id)
         archive = await db.archive_size(owner_id)
-        await _show(call, texts.stats_card(data, archive), keyboards.back())
+        await _show(call, texts.stats_card(data, archive), keyboards.back("m:more"))
     elif screen == "log":
         rows = await db.last_log(owner_id, 10)
         await _show(call, texts.log_card(rows), keyboards.back())
     elif screen == "how":
-        await _show(call, texts.how(), keyboards.back())
+        await _show(call, texts.how(), keyboards.back("m:more"))
     await call.answer()
 
 
@@ -415,7 +410,9 @@ async def _redraw(call: CallbackQuery, bot: Bot, field: str) -> None:
     """Вернуться на тот экран, с которого нажали переключатель."""
     owner_id = call.from_user.id
     st = await db.settings_of(owner_id)
-    if field in ("greet", "fallback"):
+    if field == "active":
+        await _show(call, texts.settings_card(st), keyboards.more(st))
+    elif field in ("greet", "fallback"):
         await _show(call, texts.texts_card(st), keyboards.texts_menu(st))
     elif field in ("spy", "spy_edits"):
         archive = await db.archive_size(owner_id)

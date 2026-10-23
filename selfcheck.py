@@ -323,6 +323,12 @@ def premium_checks() -> None:
         plain.text == "🔇 привет" and button.icon_custom_emoji_id is None and button.text == "Мут",
     )
     check("откат не трогает исходный запрос", method.text.startswith("<tg-emoji"))
+    plain_panel = pe.drop(f"{pe.e('solutions')} <b>Меню</b>\n{pe.e('trash')} След")
+    check(
+        "без премиума цветные заменители убираются",
+        plain_panel == "<b>Меню</b>\nСлед",
+        repr(plain_panel),
+    )
 
 
 def timer_checks() -> None:
