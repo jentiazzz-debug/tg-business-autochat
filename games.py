@@ -183,6 +183,12 @@ def stop(owner_id: int, chat_id: int) -> None:
     _sessions.pop(key(owner_id, chat_id), None)
 
 
+def prune() -> None:
+    """Выкинуть брошенные партии — иначе они висят в памяти до рестарта."""
+    for k in [k for k, s in _sessions.items() if not s.alive()]:
+        _sessions.pop(k, None)
+
+
 def active_count() -> int:
     return sum(1 for s in _sessions.values() if s.alive())
 

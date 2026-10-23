@@ -21,6 +21,8 @@ from datetime import datetime
 from typing import Any, Mapping, Sequence
 
 import config
+import pe
+from pe import e
 
 BRAND = config.BRAND
 LINE = "━━━━━━━━━━━━━━━━━"
@@ -90,23 +92,28 @@ KINDS: dict[str, str] = {
     "other": "сообщение",
 }
 
+#: Иконка из пака бренда для каждого типа вложения.
 KIND_ICONS: dict[str, str] = {
-    "text": "💬",
-    "photo": "🖼",
-    "video": "🎬",
-    "animation": "🎞",
-    "voice": "🎙",
-    "video_note": "⭕️",
-    "audio": "🎵",
-    "document": "📎",
-    "sticker": "🪄",
-    "contact": "👤",
-    "location": "📍",
-    "poll": "📊",
-    "story": "📖",
-    "dice": "🎲",
-    "other": "💬",
+    "text": "chat",
+    "photo": "image",
+    "video": "video",
+    "animation": "images",
+    "voice": "mic",
+    "video_note": "record",
+    "audio": "music",
+    "document": "attach",
+    "sticker": "magic",
+    "contact": "contacts",
+    "location": "pin",
+    "poll": "bar_chart",
+    "story": "play",
+    "dice": "target",
+    "other": "chat",
 }
+
+
+def kind_icon(kind: str) -> str:
+    return e(KIND_ICONS.get(kind, "chat"))
 
 REPLY_KINDS = {
     "rule": "по правилу",
@@ -121,23 +128,25 @@ REPLY_KINDS = {
 # --------------------------------------------------------------------------
 
 START = (
-    f"🎭 <b>{BRAND}</b>\n"
+    f"{e('solutions')} <b>{BRAND}</b>\n"
     "<i>выходит на площадку вместо вас</i>\n\n"
-    "Бот подключается к вашему Telegram Business и в личных чатах умеет "
-    "три вещи:\n\n"
-    "💬 <b>Отвечать за вас</b> — по правилам «слова → ответ», с режимом "
-    "«отошёл» и приветствием новым.\n"
-    "🗑 <b>Держать след</b> — показывать, что собеседник удалил или "
-    "переписал: текст, фото, гифку, голосовое.\n"
-    "⌨️ <b>Слушать команды</b> — {commands} команд прямо в переписке: "
-    "стилизация текста, игры на двоих, обработка фото, профиль.\n\n"
-    "<b>Как подключить</b>\n"
-    "1. Настройки Telegram → <b>Telegram для бизнеса</b> → "
-    "<b>Автоматизация чатов</b>\n"
-    "2. Вставьте <code>@{bot}</code>\n"
-    "3. Выдайте права — что разрешите, то и заработает\n\n"
-    "<i>Нужен Telegram Premium: без него раздела «для бизнеса» в "
-    "настройках нет.</i>"
+    "Бот подключается к вашему Telegram Business и работает прямо в "
+    "ваших личных чатах:\n\n"
+    f"{e('trash')} <b>Сохраняет удалённое</b> — собеседник стёр сообщение, "
+    "а вы всё равно видите текст, фото, голосовое или кружок.\n"
+    f"{e('edit')} <b>Ловит правки</b> — было → стало.\n"
+    f"{e('shield')} <b>Антискам</b> — разбирает первые сообщения от "
+    "незнакомых и объясняет, почему счёл их спамом.\n"
+    f"{e('chat')} <b>Отвечает за вас</b> — правила «слова → ответ», режим "
+    "«отошёл», приветствие новым.\n"
+    f"{e('code')} <b>{{commands}} команд</b> прямо в переписке: мут, досье, "
+    "игры, стили текста, напоминания.\n\n"
+    f"{e('link')} <b>Как подключить</b>\n"
+    f"{e('num1')} Настройки Telegram → <b>Telegram для бизнеса</b>\n"
+    f"{e('num2')} <b>Автоматизация чатов</b> → вставьте <code>@{{bot}}</code>\n"
+    f"{e('num3')} Выдайте права — что разрешите, то и заработает\n\n"
+    f"{e('star')} <i>Нужен Telegram Premium: без него раздела «для бизнеса» "
+    "в настройках нет.</i>"
 )
 
 
@@ -152,15 +161,15 @@ def connected(rights: Mapping[str, bool], st: Mapping[str, Any]) -> str:
         if not rights.get(name)
     ]
     lines = [
-        f"🎭 <b>{BRAND} на площадке.</b>",
+        f"{e('check')} <b>{BRAND} на площадке.</b>",
         f"<i>Прав выдано: {len(given)}</i>",
         "",
         "Что дальше:",
-        "📋 <b>Правила</b> — на какие слова отвечать;",
-        "🛡 <b>Антискам</b> — уже включён, разбирает первые сообщения от "
-        "незнакомых;",
-        "🗑 <b>След</b> — уже включён, покажет удалённое и правки;",
-        f"⌨️ <b>Команды</b> — напишите <code>{st['prefix']}помощь</code> в "
+        f"{e('trash')} <b>След</b> — уже включён, покажет удалённое и правки;",
+        f"{e('shield')} <b>Антискам</b> — уже включён, разбирает первые "
+        "сообщения от незнакомых;",
+        f"{e('checklist')} <b>Правила</b> — на какие слова отвечать;",
+        f"{e('code')} <b>Команды</b> — напишите <code>{st['prefix']}помощь</code> в "
         "любом своём чате.",
         "",
         "<i>Пока правил нет, от вашего имени бот не пишет ничего сам.</i>",
@@ -168,7 +177,7 @@ def connected(rights: Mapping[str, bool], st: Mapping[str, Any]) -> str:
     if lost:
         lines += [
             "",
-            "⚠️ Не выдано: " + ", ".join(f"«{t}»" for t in lost) + ".",
+            f"{e('warning')} Не выдано: " + ", ".join(f"«{t}»" for t in lost) + ".",
             "Без первого бот не сможет отвечать, без остальных — убирать "
             "сообщения с командами и работать с глухим режимом.",
         ]
@@ -176,7 +185,7 @@ def connected(rights: Mapping[str, bool], st: Mapping[str, Any]) -> str:
 
 
 DISCONNECTED = (
-    f"🎭 <b>{BRAND} ушёл со сцены.</b>\n\n"
+    f"{e('power')} <b>{BRAND} ушёл со сцены.</b>\n\n"
     "Подключение к Telegram Business отключено. Правила, тексты и "
     "настройки сохранены — при повторном подключении всё поднимется "
     "как было."
@@ -189,7 +198,7 @@ NOT_ALLOWED = (
 )
 
 NO_REPLY_RIGHT = (
-    "⚠️ Боту не выдано право отвечать в чатах. Откройте «Автоматизация "
+    f"{e('warning')} Боту не выдано право отвечать в чатах. Откройте «Автоматизация "
     "чатов» и включите разрешение отвечать — иначе он сможет только "
     "следить за удалённым."
 )
@@ -197,7 +206,7 @@ NO_REPLY_RIGHT = (
 
 def no_connection(bot_username: str) -> str:
     return (
-        "⚠️ <b>Бот пока не подключён к вашим чатам.</b>\n\n"
+        f"{e('warning')} <b>Бот пока не подключён к вашим чатам.</b>\n\n"
         "Настройки Telegram → <b>Telegram для бизнеса</b> → "
         f"<b>Автоматизация чатов</b> → вставьте <code>@{bot_username}</code>.\n\n"
         "Настройки ниже можно задать заранее — они применятся сразу "
@@ -231,7 +240,12 @@ def panel(
     else:
         status = f"на площадке · {chats} {plural(chats, 'чат', 'чата', 'чатов')}"
 
-    mode = "🌙 отошёл" if st["away"] else ("🟢 в работе" if st["active"] else "🔴 молчит")
+    if st["away"]:
+        mode = f"{e('pause')} отошёл"
+    elif st["active"]:
+        mode = f"{e('on')} в работе"
+    else:
+        mode = f"{e('off')} молчит"
 
     rules_note = (
         f"{active_rules} из {rules}" if rules else "нет ни одного"
@@ -255,18 +269,18 @@ def panel(
 
     return "\n".join(
         (
-            f"🎭 <b>{BRAND}</b>",
+            f"{e('solutions')} <b>{BRAND}</b>",
             f"<i>{status}</i>",
             "",
-            f"       <b>{mode}</b>",
+            f"<b>{mode}</b>",
             LINE,
-            f"💬 <b>Автоответы</b> · правил {rules_note}",
-            f"🛡 <b>Антискам</b> · {filter_note}",
-            f"🗑 <b>След</b> · {trace_note}",
-            f"⌨️ <b>Команды</b> · {cmd_note}",
+            f"{e('trash')} <b>След</b> · {trace_note}",
+            f"{e('shield')} <b>Антискам</b> · {filter_note}",
+            f"{e('chat')} <b>Автоответы</b> · правил {rules_note}",
+            f"{e('code')} <b>Команды</b> · {cmd_note}",
             LINE,
-            f"⏳ пауза после вашего ответа — {mins(st['pause_minutes'])}",
-            f"🕒 между автоответами — {secs(st['cooldown'])}",
+            f"{e('pending')} пауза после вашего ответа — {mins(st['pause_minutes'])}",
+            f"{e('clock')} между автоответами — {secs(st['cooldown'])}",
         )
     )
 
@@ -274,25 +288,25 @@ def panel(
 def how() -> str:
     return (
         f"<b>Как {BRAND} устроен</b>\n\n"
-        "<b>💬 Автоответы.</b> Правило — это слова-триггеры и готовый "
+        f"{e('chat')} <b>Автоответы.</b> Правило — это слова-триггеры и готовый "
         "ответ. Совпадение ищется с начала слова: <code>цен</code> поймает "
         "«цену» и «ценник», но не «оценку». <code>=да</code> — только "
         "точное «да».\n"
         "Бот молчит, если вы сами написали в чат, если только что уже "
         "отвечал, если чат исключён или если ничего не подошло. Разобрать "
         "конкретный случай — <code>.почему</code> в том чате.\n\n"
-        "<b>🛡 Антискам.</b> Каждый признак даёт очки: работа и заработок "
+        f"{e('shield')} <b>Антискам.</b> Каждый признак даёт очки: работа и заработок "
         "— 3, крипта — 3, просьба прислать код — 5, ссылка — 2, кнопки — "
         "2. Сумма выше порога — сообщение убирается, а вам приходит "
         "карточка с текстом и разбором, по каким именно признакам.\n"
         "Коммерческие признаки проверяются только у тех, с кем переписки "
         "ещё не было. Исполняемые файлы и выпрашивание кодов — всегда, "
         "даже у знакомых: так выглядит взломанный аккаунт друга.\n\n"
-        "<b>🗑 След.</b> Telegram сообщает боту только номера удалённых "
+        f"{e('trash')} <b>След.</b> Telegram сообщает боту только номера удалённых "
         "сообщений — без текста и файлов. Поэтому бот складывает входящие "
         "в свой архив и достаёт оттуда, когда их удаляют. Видно только "
         "то, что пришло после подключения.\n\n"
-        "<b>⌨️ Команды.</b> Пишутся в любом вашем чате с префиксом. Бот "
+        f"{e('code')} <b>Команды.</b> Пишутся в любом вашем чате с префиксом. Бот "
         "убирает вашу команду и ставит на её место результат — со стороны "
         "выглядит так, будто вы сразу так и написали. Список — "
         "<code>.помощь</code>."
@@ -323,14 +337,14 @@ def deleted_card(
     total_deleted: int = 0,
 ) -> str:
     """Карточка «удалено»: кто, когда и что именно."""
-    head = f"🗑 <b>Удалено</b> · {who(name, username, user_id)}"
+    head = f"{e('trash')} <b>Удалено</b> · {who(name, username, user_id)}"
     total = len(rows) + extra
     if total > 1:
         head += f"\nСразу {total} {plural(total, 'сообщение', 'сообщения', 'сообщений')}"
     lines = [head, ""]
     for row in rows:
         kind = row["kind"]
-        icon = KIND_ICONS.get(kind, "💬")
+        icon = kind_icon(kind)
         stamp = f"<code>{when(row['at'])}</code>"
         body = esc(row["text"] or "")
         if kind == "text":
@@ -363,7 +377,7 @@ def edited_card(
     ts: int,
 ) -> str:
     return (
-        f"✏️ <b>Изменено</b> · {who(name, username, user_id)}\n"
+        f"{e('edit')} <b>Изменено</b> · {who(name, username, user_id)}\n"
         f"<code>{when(ts)}</code>\n\n"
         f"<b>Было:</b>\n{esc(before) or '<i>пусто</i>'}\n\n"
         f"<b>Стало:</b>\n{esc(after) or '<i>пусто</i>'}"
@@ -379,11 +393,11 @@ def muted_card(
     text: str,
     removed: bool,
 ) -> str:
-    icon = KIND_ICONS.get(kind, "💬")
+    icon = kind_icon(kind)
     tail = "" if removed else "\n\n<i>Из чата убрать не вышло — нет права.</i>"
     body = esc(text) or f"<i>{KINDS.get(kind, kind)}</i>"
     return (
-        f"🔇 <b>Глухой режим</b> · {who(name, username, user_id)}\n\n"
+        f"{e('mute')} <b>Мут</b> · {who(name, username, user_id)}\n\n"
         f"{icon} {body}{tail}"
     )
 
@@ -399,11 +413,11 @@ def filtered_card(
     removed: bool,
 ) -> str:
     """Карточка антискама с разбором — главное отличие от чужих фильтров."""
-    icon = KIND_ICONS.get(kind, "💬")
-    signals = "\n".join(f"   ▪️ {esc(s.note)} <code>+{s.weight}</code>" for s in verdict.signals)
+    icon = kind_icon(kind)
+    signals = "\n".join(f"{e('dots')} {esc(s.note)} <code>+{s.weight}</code>" for s in verdict.signals)
     action = "убрано из чата" if removed else "оставлено в чате"
     return (
-        f"🛡 <b>Антискам</b> · {who(name, username, user_id)}\n"
+        f"{e('shield')} <b>Антискам</b> · {who(name, username, user_id)}\n"
         f"<i>{verdict.score} из {verdict.threshold} нужных · {action}</i>\n\n"
         f"{signals}\n\n"
         f"{icon} <b>Текст:</b>\n{esc(short(text, 700)) or f'<i>{KINDS.get(kind, kind)}</i>'}"
@@ -418,7 +432,7 @@ def new_dialog_card(
     text: str,
 ) -> str:
     return (
-        f"👋 <b>Новый диалог</b> · {who(name, username, user_id)}\n\n"
+        f"{e('user_plus')} <b>Новый диалог</b> · {who(name, username, user_id)}\n\n"
         f"{esc(short(text, 400)) or '<i>без текста</i>'}"
     )
 
@@ -431,12 +445,12 @@ def new_dialog_card(
 def rules_list(rules: Sequence[Mapping[str, Any]]) -> str:
     if not rules:
         return (
-            "💬 <b>Автоответы</b>\n\nПравил нет. Правило — это слова-триггеры "
+            f"{e('chat')} <b>Автоответы</b>\n\nПравил нет. Правило — это слова-триггеры "
             "и готовый ответ на них. Проверяются сверху вниз, отвечает "
             "первое подошедшее."
         )
     lines = [
-        "💬 <b>Автоответы</b>",
+        f"{e('chat')} <b>Автоответы</b>",
         "<i>Проверяются сверху вниз, отвечает первое подошедшее.</i>",
         "",
     ]
@@ -461,7 +475,7 @@ def rule_card(rule: Mapping[str, Any]) -> str:
 
 
 def rule_saved(rule: Mapping[str, Any]) -> str:
-    return "✅ <b>Правило сохранено</b>\n\n" + rule_card(rule)
+    return f"{e('check')} <b>Правило сохранено</b>\n\n" + rule_card(rule)
 
 
 def confirm_delete(rule: Mapping[str, Any]) -> str:
@@ -494,13 +508,13 @@ SAMPLES_ADDED = (
 
 def texts_card(st: Mapping[str, Any]) -> str:
     return (
-        "✍️ <b>Тексты</b>\n\n"
-        f"🌙 <b>Отошёл</b> (сейчас {onoff(st['away'])})\n"
+        f"{e('edit')} <b>Тексты</b>\n\n"
+        f"{e('pause')} <b>Отошёл</b> (сейчас {onoff(st['away'])})\n"
         f"{esc(st['away_text'])}\n\n"
-        f"👋 <b>Приветствие</b> — первое сообщение из нового чата "
+        f"{e('user_plus')} <b>Приветствие</b> — первое сообщение из нового чата "
         f"({onoff(st['greet'])})\n"
         f"{esc(st['greet_text'])}\n\n"
-        f"💬 <b>По умолчанию</b> — когда правила не подошли "
+        f"{e('chat')} <b>По умолчанию</b> — когда правила не подошли "
         f"({onoff(st['fallback'])})\n"
         f"{esc(st['fallback_text'])}\n\n"
         "<i>Приветствие уйдёт при первом сообщении из каждого чата — в том "
@@ -526,12 +540,12 @@ def ask_text(field: str, current: str) -> str:
 
 def timings_card(st: Mapping[str, Any]) -> str:
     return (
-        "⏱ <b>Паузы</b>\n\n"
-        f"🕒 <b>Между ответами в одном чате: {secs(st['cooldown'])}</b>\n"
+        f"{e('timer')} <b>Паузы</b>\n\n"
+        f"{e('clock')} <b>Между ответами в одном чате: {secs(st['cooldown'])}</b>\n"
         "Держит бота от очереди одинаковых ответов, когда человек пишет "
         "мысль в три сообщения. Ответ по другому правилу эту паузу "
         "обходит — на новый вопрос бот отвечает сразу.\n\n"
-        f"⏳ <b>После вашего ответа: {mins(st['pause_minutes'])}</b>\n"
+        f"{e('pending')} <b>После вашего ответа: {mins(st['pause_minutes'])}</b>\n"
         "Главное правило вежливости: вы написали в чат сами — бот "
         "замолкает и не лезет в живой диалог.\n\n"
         "<i>Верхний ряд — между ответами, нижний — после вашего.</i>"
@@ -541,7 +555,7 @@ def timings_card(st: Mapping[str, Any]) -> str:
 def trace_card(st: Mapping[str, Any], archive: int) -> str:
     days = f"{st['keep_days']} дн."
     return (
-        "🗑 <b>След</b>\n"
+        f"{e('trash')} <b>След</b>\n"
         "<i>то, что собеседник пытался стереть</i>\n\n"
         f"Ловить удалённые: <b>{onoff(st['spy'])}</b>\n"
         f"Сообщать о правках: <b>{onoff(st['spy_edits'])}</b>\n"
@@ -561,7 +575,7 @@ def trace_card(st: Mapping[str, Any], archive: int) -> str:
 def guard_card(st: Mapping[str, Any]) -> str:
     words = st["filter_words"] or ""
     return (
-        "🛡 <b>Антискам</b>\n"
+        f"{e('shield')} <b>Антискам</b>\n"
         "<i>разбор первых сообщений от незнакомых</i>\n\n"
         f"Фильтр: <b>{onoff(st['filter_on'])}</b>\n"
         f"Что делает: <b>{'удаляет и сообщает' if st['filter_delete'] else 'только сообщает'}</b>\n"
@@ -569,14 +583,14 @@ def guard_card(st: Mapping[str, Any]) -> str:
         f"Уведомлять о новых диалогах: <b>{onoff(st['notify_new'])}</b>\n"
         f"Свои слова: <code>{esc(short(words, 90)) or 'нет'}</code>\n\n"
         "<b>Очки за признаки</b>\n"
-        "▪️ выпрашивает код или пароль — 5\n"
-        "▪️ исполняемый файл — 5\n"
-        "▪️ работа, заработок, крипта, ставки — 3\n"
-        "▪️ просит денег или реквизиты — 3\n"
-        "▪️ ссылка, кнопки, зовёт в бота — 2\n"
-        "▪️ пишет бот, розыгрыш — 2\n"
-        "▪️ срочность, простыня текста, форвард — 1\n"
-        "▪️ ваше слово из списка — 4\n\n"
+        f"{e('dots')} выпрашивает код или пароль — 5\n"
+        f"{e('dots')} исполняемый файл — 5\n"
+        f"{e('dots')} работа, заработок, крипта, ставки — 3\n"
+        f"{e('dots')} просит денег или реквизиты — 3\n"
+        f"{e('dots')} ссылка, кнопки, зовёт в бота — 2\n"
+        f"{e('dots')} пишет бот, розыгрыш — 2\n"
+        f"{e('dots')} срочность, простыня текста, форвард — 1\n"
+        f"{e('dots')} ваше слово из списка — 4\n\n"
         "Порог <b>2</b> — строго, <b>3</b> — как надо, <b>5</b> — только "
         "явный спам.\n\n"
         "<i>Коммерческие признаки проверяются только у тех, с кем "
@@ -586,7 +600,7 @@ def guard_card(st: Mapping[str, Any]) -> str:
 
 def commands_card(st: Mapping[str, Any], total: int, groups: Sequence[tuple[str, str, int]]) -> str:
     lines = [
-        "⌨️ <b>Команды</b>",
+        f"{e('code')} <b>Команды</b>",
         f"<i>{total} {plural(total, 'команда', 'команды', 'команд')} прямо в переписке</i>",
         "",
         f"Состояние: <b>{onoff(st['commands'])}</b>",
@@ -594,7 +608,7 @@ def commands_card(st: Mapping[str, Any], total: int, groups: Sequence[tuple[str,
         "",
     ]
     for icon, title, count in groups:
-        lines.append(f"{icon} <b>{title}</b> — {count}")
+        lines.append(f"{e(icon)} <b>{title}</b> — {count}")
     lines += [
         "",
         f"Полный список — <code>{esc(st['prefix'])}помощь</code> в любом "
@@ -609,22 +623,22 @@ def commands_card(st: Mapping[str, Any], total: int, groups: Sequence[tuple[str,
 def chats_card(rows: Sequence[Mapping[str, Any]]) -> str:
     if not rows:
         return (
-            "💬 <b>Диалоги</b>\n\nПока пусто. Здесь появятся личные чаты, в "
+            f"{e('chats')} <b>Диалоги</b>\n\nПока пусто. Здесь появятся личные чаты, в "
             "которых бот увидел сообщения после подключения."
         )
     lines = [
-        "💬 <b>Диалоги</b>",
+        f"{e('chats')} <b>Диалоги</b>",
         "<i>Нажатие переключает: отвечать в этом чате или молчать.</i>",
         "",
     ]
     for row in rows:
         marks = []
         if row["ignored"]:
-            marks.append("🔕")
+            marks.append(e("bell_off"))
         if row["muted"]:
-            marks.append("🔇")
+            marks.append(e("mute"))
         if row["trusted"]:
-            marks.append("🛡")
+            marks.append(e("shield_check"))
         nick = f" @{esc(row['username'])}" if row["username"] else ""
         tail = []
         if row["deleted"]:
@@ -634,7 +648,7 @@ def chats_card(rows: Sequence[Mapping[str, Any]]) -> str:
         if row["flagged"]:
             tail.append(f"фильтр {row['flagged']}")
         lines.append(
-            f"{''.join(marks) or '🔔'} <b>{esc(row['title'] or row['chat_id'])}</b>{nick}\n"
+            f"{''.join(marks) or e('bell')} <b>{esc(row['title'] or row['chat_id'])}</b>{nick}\n"
             f"    его {row['incoming']} · ответов {row['replies']}"
             + (f" · {', '.join(tail)}" if tail else "")
         )
@@ -643,7 +657,7 @@ def chats_card(rows: Sequence[Mapping[str, Any]]) -> str:
 
 def stats_card(data: Mapping[str, Any], archive: int) -> str:
     lines = [
-        "📊 <b>Сводка</b>",
+        f"{e('bar_chart')} <b>Сводка</b>",
         "",
         f"Автоответов за сутки: <b>{data['day']}</b>",
         f"За неделю: <b>{data['week']}</b>",
@@ -660,8 +674,8 @@ def stats_card(data: Mapping[str, Any], archive: int) -> str:
 
 def log_card(rows: Sequence[Mapping[str, Any]]) -> str:
     if not rows:
-        return "🧾 <b>Последние ответы</b>\n\nПока бот ничего не отправлял."
-    lines = ["🧾 <b>Последние ответы</b>", ""]
+        return f"{e('history')} <b>Последние ответы</b>\n\nПока бот ничего не отправлял."
+    lines = [f"{e('history')} <b>Последние ответы</b>", ""]
     for row in rows:
         lines.append(
             f"<code>{when(row['at'])}</code> · "
@@ -671,3 +685,19 @@ def log_card(rows: Sequence[Mapping[str, Any]]) -> str:
         )
         lines.append("")
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# То, что видит собеседник
+# --------------------------------------------------------------------------
+
+
+def mute_public(name: str, span: str | None = None) -> str:
+    """Объявление в чате вместо команды .мут."""
+    tail = f"\n{e('timer')} <i>на {esc(span)}</i>" if span else ""
+    return f"{e('mute')} <b>{esc(name)}</b> в муте{tail}"
+
+
+def unmute_public(name: str, *, auto: bool = False) -> str:
+    why = f"\n{e('clock')} <i>срок мута вышел</i>" if auto else ""
+    return f"{e('volume')} <b>{esc(name)}</b> больше не в муте{why}"

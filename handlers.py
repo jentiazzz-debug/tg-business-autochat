@@ -12,14 +12,18 @@
 
 from __future__ import annotations
 
+import html
 import logging
+import re
+from pathlib import Path
+from typing import Any, Awaitable, Callable
 
-from aiogram import Bot, F, Router
+from aiogram import BaseMiddleware, Bot, F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardMarkup, Message
 
 import cmdbase
 import commands
@@ -27,7 +31,10 @@ import config
 import db
 import engine
 import keyboards
+import mirrors
+import subs
 import texts
+from pe import e
 
 log = logging.getLogger("autochat.panel")
 router = Router(name="panel")
@@ -63,6 +70,63 @@ TOGGLE_HINTS = {
 }
 
 
+class SubGate(BaseMiddleware):
+    """Обязательная подписка перед любым действием в панели.
+
+    Стоит на роутере панели (и кабинете зеркал), поэтому админка и
+    бизнес-апдейты её не проходят: у бизнес-сообщений своя проверка в
+    business.py. Пропускает только кнопку «Я подписался» — она сама
+    перепроверяет подписку.
+    """
+
+    async def __call__(
+        self,
+        handler: Callable[[Any, dict[str, Any]], Awaitable[Any]],
+        event: Message | CallbackQuery,
+        data: dict[str, Any],
+    ) -> Any:
+        user = event.from_user
+        if user is None:
+            return await handler(event, data)
+        if isinstance(event, CallbackQuery) and event.data == "sub:check":
+            return await handler(event, data)
+        if isinstance(event, Message) and event.chat.type != "private":
+            return await handler(event, data)
+        need = await subs.missing(user.id)
+        if not need:
+            return await handler(event, data)
+        await ask_subscribe(event, need)
+        return None
+
+
+async def ask_subscribe(event: Message | CallbackQuery, need: list) -> None:
+    text = subscribe_text(need)
+    markup = keyboards.subscribe(need)
+    if isinstance(event, CallbackQuery):
+        await event.answer("Сначала подпишитесь на каналы", show_alert=False)
+        if event.message is not None:
+            await event.message.answer(text, reply_markup=markup)
+    else:
+        await event.answer(text, reply_markup=markup)
+
+
+def subscribe_text(need: list) -> str:
+    lines = [
+        f"{e('lock')} <b>Подпишитесь, чтобы пользоваться ботом</b>",
+        "",
+        "Бот бесплатный — его держат подписки на наши каналы:",
+        "",
+    ]
+    for ch in need:
+        lines.append(f"{e('megaphone')} <b>{html.escape(ch['title'], quote=False)}</b>")
+    lines += ["", f"После подписки нажмите «Я подписался» {e('check')}"]
+    return "\n".join(lines)
+
+
+router.message.middleware(SubGate())
+router.callback_query.middleware(SubGate())
+
+
 class Form(StatesGroup):
     triggers = State()
     reply = State()
@@ -78,6 +142,45 @@ class Form(StatesGroup):
 #: Предел подписи к фото в Telegram. Экран длиннее уходит текстом:
 #: подпись такой длины Telegram просто не принимает.
 CAPTION_LIMIT = 1024
+
+#: Баннер меню по умолчанию — пока админ не загрузил свой.
+DEFAULT_BANNER = Path(__file__).resolve().parent / "assets" / "banner.jpg"
+
+_TAGS = re.compile(r"<[^>]+>")
+
+
+def visible_len(text: str) -> int:
+    """Сколько символов увидит Telegram: без тегов и HTML-сущностей.
+
+    Лимит подписи считается по видимому тексту, а у нас половина строки
+    — разметка и теги премиум-иконок.
+    """
+    return len(html.unescape(_TAGS.sub("", text)))
+
+
+def _banner_key(bot: Bot) -> str:
+    # file_id у каждого бота свой: фото, загруженное основным ботом,
+    # зеркало переслать не может. Поэтому кэш — на бота.
+    return f"banner_file:{bot.id}"
+
+
+async def banner_for(bot: Bot) -> str | FSInputFile | None:
+    """Что показать над главным меню: свой баннер админа или заводской."""
+    if mirrors.is_main(bot):
+        custom = await db.meta_get(db.BANNER_KEY)
+        if custom:
+            return custom
+    cached = await db.meta_get(_banner_key(bot))
+    if cached:
+        return cached
+    if DEFAULT_BANNER.exists():
+        return FSInputFile(DEFAULT_BANNER)
+    return None
+
+
+async def _remember_banner(bot: Bot, photo: object, sent: Message | None) -> None:
+    if isinstance(photo, FSInputFile) and sent is not None and sent.photo:
+        await db.meta_set(_banner_key(bot), sent.photo[-1].file_id)
 
 
 async def _show(
@@ -95,8 +198,9 @@ async def _show(
     удаляется и отправляется новое — иначе Telegram отвечает ошибкой, а
     панель остаётся на прошлом экране.
     """
-    want_photo = bool(photo) and len(text) <= CAPTION_LIMIT
+    want_photo = bool(photo) and visible_len(text) <= CAPTION_LIMIT
 
+    sent: Message | None = None
     if isinstance(event, CallbackQuery):
         message = event.message
         if message is not None:
@@ -118,21 +222,23 @@ async def _show(
             except TelegramAPIError:
                 pass
             if want_photo:
-                await message.answer_photo(photo, caption=text, reply_markup=markup)
+                sent = await message.answer_photo(photo, caption=text, reply_markup=markup)
             else:
                 await message.answer(text, reply_markup=markup)
+            await _remember_banner(event.bot, photo, sent)
             return
 
     if isinstance(event, Message):
         if want_photo:
-            await event.answer_photo(photo, caption=text, reply_markup=markup)
+            sent = await event.answer_photo(photo, caption=text, reply_markup=markup)
         else:
             await event.answer(text, reply_markup=markup)
+        await _remember_banner(event.bot, photo, sent)
 
 
 async def root(event: Message | CallbackQuery, bot: Bot, owner_id: int) -> None:
     st = await db.settings_of(owner_id)
-    conn = await db.connection_of(owner_id)
+    conn = await db.connection_of(owner_id, bot.id)
     rules = await db.rules_of(owner_id)
     stats = await db.stats_of(owner_id)
     me = await bot.me()
@@ -150,14 +256,15 @@ async def root(event: Message | CallbackQuery, bot: Bot, owner_id: int) -> None:
         text += "\n\n" + texts.no_connection(me.username or "bot")
     elif conn["enabled"] and not conn["can_reply"]:
         text += "\n\n" + texts.NO_REPLY_RIGHT
-    await _show(event, text, keyboards.root(st))
+    markup = keyboards.root(st, mirrors_on=mirrors.is_main(bot) and config.MIRRORS_PER_OWNER > 0)
+    await _show(event, text, markup, photo=await banner_for(bot))
 
 
 def _group_counts() -> list[tuple[str, str, int]]:
     """Сколько команд в каждом разделе — для экрана «Команды»."""
     out = []
     for group in cmdbase.GROUPS:
-        icon, title, _ = cmdbase.GROUP_TITLES.get(group, ("▫️", group, ""))
+        icon, title, _ = cmdbase.group_title(group)
         count = sum(1 for c in cmdbase.ORDER if c.group == group)
         if count:
             out.append((icon, title, count))
@@ -172,7 +279,7 @@ def _group_counts() -> list[tuple[str, str, int]]:
 @router.message(Command("start", "menu"), StateFilter(None))
 async def cmd_start(message: Message, bot: Bot) -> None:
     owner_id = message.from_user.id
-    conn = await db.connection_of(owner_id)
+    conn = await db.connection_of(owner_id, bot.id)
     if conn is None:
         me = await bot.me()
         await message.answer(
@@ -234,10 +341,11 @@ async def cmd_add(message: Message, state: FSMContext) -> None:
 
 @router.message(Command("commands"))
 async def cmd_commands(message: Message) -> None:
-    """Список команд в чатах — тот же, что показывает .помощь."""
+    """Справка по командам — та же, что показывает .помощь."""
     st = await db.settings_of(message.from_user.id)
-    for page in commands.help_pages(st["prefix"] or "."):
-        await message.answer(page)
+    await message.answer(
+        cmdbase.help_overview(st["prefix"] or "."), reply_markup=keyboards.help_menu()
+    )
 
 
 @router.message(Command("stats"))
@@ -391,12 +499,42 @@ async def on_prefix(call: CallbackQuery) -> None:
     await call.answer(f"Префикс команд: {sign}")
 
 
-@router.callback_query(F.data == "cmd:list")
-async def on_cmd_list(call: CallbackQuery) -> None:
+@router.callback_query(F.data.startswith("h:") | (F.data == "cmd:list"))
+async def on_help(call: CallbackQuery) -> None:
+    """Справка: обзор (h:) или страница раздела (h:<раздел>[:n])."""
     st = await db.settings_of(call.from_user.id)
-    for page in commands.help_pages(st["prefix"] or "."):
-        await call.message.answer(page)
-    await call.answer("Список отправлен ниже")
+    prefix = st["prefix"] or "."
+    parts = (call.data or "").split(":")
+    group = parts[1] if len(parts) > 1 else ""
+    if group not in cmdbase.GROUPS:
+        await _show(call, cmdbase.help_overview(prefix), keyboards.help_menu("m:cmds"))
+        await call.answer()
+        return
+    pages = cmdbase.help_section(group, prefix)
+    try:
+        page = max(0, min(int(parts[2]), len(pages) - 1)) if len(parts) > 2 else 0
+    except ValueError:
+        page = 0
+    await _show(call, pages[page], keyboards.help_page(group, page, len(pages)))
+    await call.answer()
+
+
+@router.callback_query(F.data == "sub:check")
+async def on_sub_check(call: CallbackQuery, bot: Bot) -> None:
+    need = await subs.missing(call.from_user.id, fresh=True)
+    if need:
+        await call.answer(
+            "Подписка пока не видна. Подпишитесь на все каналы из списка и "
+            "нажмите ещё раз.",
+            show_alert=True,
+        )
+        return
+    await call.answer("Спасибо! Открываю меню")
+    try:
+        await call.message.delete()
+    except TelegramAPIError:
+        pass
+    await root(call.message, bot, call.from_user.id)
 
 
 @router.callback_query(F.data == "arch:clear")

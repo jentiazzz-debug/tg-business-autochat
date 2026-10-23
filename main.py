@@ -12,8 +12,9 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from aiogram import Bot, Dispatcher
+from aiogram import BaseMiddleware, Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramRetryAfter
@@ -23,7 +24,15 @@ import admin
 import business
 import config
 import db
+import games
 import handlers
+import mirrors
+import mirrorui
+import pe
+import state
+import subs
+import timers
+from storage import LeanStorage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,6 +50,7 @@ COMMANDS = (
     ("rules", "Правила автоответов"),
     ("add", "Добавить правило"),
     ("commands", "Команды для чатов"),
+    ("mirror", "Своё зеркало бота"),
     ("stats", "Статистика"),
     ("log", "Последние ответы"),
     ("help", "Справка"),
@@ -78,6 +88,35 @@ class RetryAfter(BaseRequestMiddleware):
         return await make_request(bot, method)
 
 
+class SeenUsers(BaseMiddleware):
+    """Запомнить, через какого бота человек пишет, — для рассылки и зеркал.
+
+    В базу — один раз на пару (бот, человек) за время жизни процесса:
+    множество в памяти сбрасывается, если разрастётся.
+    """
+
+    LIMIT = 50_000
+
+    def __init__(self) -> None:
+        self._seen: set[tuple[int, int]] = set()
+
+    async def __call__(self, handler, event, data):
+        user = data.get("event_from_user")
+        chat = data.get("event_chat")
+        bot = data.get("bot")
+        if user is not None and bot is not None and chat is not None and chat.type == "private":
+            key = (bot.id, user.id)
+            if key not in self._seen:
+                if len(self._seen) > self.LIMIT:
+                    self._seen.clear()
+                self._seen.add(key)
+                try:
+                    await db.seen_user(bot.id, user.id)
+                except Exception as err:  # noqa: BLE001
+                    log.debug("seen_user: %s", err)
+        return await handler(event, data)
+
+
 async def cleanup() -> None:
     """Фоновая уборка архива и журнала.
 
@@ -86,8 +125,13 @@ async def cleanup() -> None:
     """
     while True:
         try:
-            gone = await db.prune_messages()
+            gone = await db.prune_messages() + await db.prune_trail()
             logs = await db.prune_log(config.LOG_KEEP_DAYS)
+            # Память процесса: подсказки «.почему», брошенные партии и
+            # кэш подписок не должны копиться неделями.
+            state.prune()
+            games.prune()
+            subs.prune()
             if gone or logs:
                 log.info("уборка: архив -%s, журнал -%s", gone, logs)
         except Exception as err:  # noqa: BLE001 — фоновой задаче нельзя падать
@@ -99,14 +143,14 @@ async def run() -> None:
     config.check()
     await db.connect()
 
-    bot = Bot(
-        token=config.BOT_TOKEN,
-        default=DefaultBotProperties(
-            parse_mode=ParseMode.HTML, link_preview_is_disabled=True
-        ),
-    )
-    bot.session.middleware(RetryAfter())
-    dispatcher = Dispatcher()
+    # Одна HTTP-сессия на основной бот и все зеркала: см. mirrors.py.
+    session = AiohttpSession()
+    session.middleware(RetryAfter())
+    session.middleware(pe.PremiumFallback())
+    default = DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True)
+    bot = Bot(token=config.BOT_TOKEN, session=session, default=default)
+    dispatcher = Dispatcher(storage=LeanStorage())
+    dispatcher.update.outer_middleware(SeenUsers())
 
     # Бизнес-роутер идёт первым: он обслуживает свои типы апдейтов и с
     # панелью не пересекается, но так порядок читается сверху вниз —
@@ -116,6 +160,8 @@ async def run() -> None:
     # обработчик любого текста в личке, и он перехватывал бы то, что
     # админ вводит в мастере рассылки.
     dispatcher.include_router(admin.router)
+    # Кабинет зеркал — тоже раньше панели: он ждёт токен текстом.
+    dispatcher.include_router(mirrorui.router)
     dispatcher.include_router(handlers.router)
     if config.ALLOWED_IDS:
         # Последним: сюда попадают только те, кого отсеял фильтр панели.
@@ -123,6 +169,18 @@ async def run() -> None:
 
     me = await bot.me()
     log.info("бот @%s (%s)", me.username, me.id)
+    await db.adopt_legacy(me.id)
+    await db.seed_audience(me.id)
+    subs.MAIN_BOT = bot
+    mirrors.MAIN, mirrors.DP, mirrors.SESSION, mirrors.DEFAULT = bot, dispatcher, session, default
+    mirrors.COMMANDS = [
+        BotCommand(command=name, description=text)
+        for name, text in COMMANDS
+        if name != "mirror"
+    ]
+    mirrors.CAN_MANAGE = bool(getattr(me, "can_manage_bots", False))
+    if config.REQUIRED_CHANNEL:
+        log.info("обязательная подписка: канал %s", config.REQUIRED_CHANNEL)
     if not getattr(me, "can_connect_to_business", False):
         log.warning(
             "У бота выключен Business Mode — в «Автоматизации чатов» его не "
@@ -163,6 +221,13 @@ async def run() -> None:
         )
 
     janitor = asyncio.create_task(cleanup())
+    clock = asyncio.create_task(timers.loop())
+    await mirrors.boot()
+    log.info(
+        "зеркал запущено: %s · создание кнопкой: %s",
+        mirrors.running(),
+        "да" if mirrors.CAN_MANAGE else "нет (включите управление ботами в @BotFather)",
+    )
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await dispatcher.start_polling(
@@ -170,6 +235,8 @@ async def run() -> None:
         )
     finally:
         janitor.cancel()
+        clock.cancel()
+        await mirrors.shutdown()
         await db.close()
         await bot.session.close()
 

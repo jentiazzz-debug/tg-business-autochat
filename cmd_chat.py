@@ -12,8 +12,9 @@
 «.мут» здесь тоже другой. Заглушить человека в личке Telegram нельзя —
 такой возможности в API нет ни у бота, ни у аккаунта. Зато можно
 удалять его сообщения по мере поступления, а текст присылать владельцу
-в личку. Получается «глухой режим»: собеседник пишет в пустоту, владелец
-всё читает, но чат не мигает.
+в личку. Собеседник видит в чате «… в муте» с премиум-иконкой и дальше
+пишет в пустоту, владелец всё читает, но чат не мигает. Мут бывает на
+время — «.мут 30м», — снимает его фоновая задача timers.py.
 """
 
 from __future__ import annotations
@@ -30,7 +31,9 @@ import db
 import engine
 import state
 import texts
+import timers
 import whois
+from pe import e
 from cmdbase import Ctx, command
 
 MAX_PURGE = 100
@@ -49,7 +52,7 @@ def esc(text: object) -> str:
 async def cmd_info(ctx: Ctx) -> None:
     chat = await db.chat_of(ctx.owner_id, ctx.chat_id)
     peer_id = ctx.peer_id or ctx.chat_id
-    lines = [f"<b>{esc(ctx.peer_name)}</b>"]
+    lines = [f"{e('id_card')} <b>{esc(ctx.peer_name)}</b>"]
     if chat["username"]:
         lines.append(f"@{esc(chat['username'])}")
     lines.append(f"id: <code>{peer_id}</code>")
@@ -61,59 +64,65 @@ async def cmd_info(ctx: Ctx) -> None:
             f"· {whois.age_words(when)} <i>(оценка по id)</i>"
         )
 
-    lines += ["", "<b>В переписке с вами</b>"]
+    lines += ["", f"{e('chats')} <b>В переписке с вами</b>"]
     lines.append(f"диалог с {whois.since_words(chat['first_seen'])}")
     lines.append(f"его сообщений: <b>{chat['incoming']}</b>")
     lines.append(f"автоответов бота: <b>{chat['replies']}</b>")
     if chat["deleted"]:
-        lines.append(f"🗑 удалил сообщений: <b>{chat['deleted']}</b>")
+        lines.append(f"{e('trash')} удалил сообщений: <b>{chat['deleted']}</b>")
     if chat["edited"]:
-        lines.append(f"✏️ правил сообщений: <b>{chat['edited']}</b>")
+        lines.append(f"{e('edit')} правил сообщений: <b>{chat['edited']}</b>")
     if chat["flagged"]:
-        lines.append(f"🛡 срабатываний антискама: <b>{chat['flagged']}</b>")
+        lines.append(f"{e('shield')} срабатываний антискама: <b>{chat['flagged']}</b>")
 
     score, word = whois.trust(chat)
     if score:
-        lines.append(f"поведение: <b>{word}</b> ({score}/100)")
+        lines.append(f"{e('gauge')} поведение: <b>{word}</b> ({score}/100)")
 
     flags = []
     if chat["muted"]:
-        flags.append("🔇 в муте")
+        flags.append(f"{e('mute')} в муте")
     if chat["ignored"]:
-        flags.append("🔕 без автоответов")
+        flags.append(f"{e('bell_off')} без автоответов")
     if flags:
         lines += ["", " · ".join(flags)]
 
     if chat["note"]:
-        lines += ["", f"📝 <i>{esc(chat['note'])}</i>"]
+        lines += ["", f"{e('note')} <i>{esc(chat['note'])}</i>"]
 
     await ctx.replace("\n".join(lines), html=True)
 
 
 @command("ид", "номер", group="диалог", about="id собеседника")
 async def cmd_id(ctx: Ctx) -> None:
-    await ctx.replace(f"<code>{ctx.peer_id or ctx.chat_id}</code>", html=True)
+    await ctx.replace(f"{e('badge_id')} <code>{ctx.peer_id or ctx.chat_id}</code>", html=True)
 
 
-@command("заметка", "помета", group="диалог", about="заметка о собеседнике", usage="[текст]")
+@command(
+    "заметка", "помета",
+    group="диалог",
+    about="заметка о собеседнике — видите только вы",
+    usage="[текст]",
+    example="должен 500 до пятницы",
+)
 async def cmd_note(ctx: Ctx) -> None:
     text = ctx.text()
     if not text:
         chat = await db.chat_of(ctx.owner_id, ctx.chat_id)
         current = chat["note"] or "пусто"
         await ctx.drop_command()
-        await ctx.to_owner(f"📝 Заметка о {esc(ctx.peer_name)}: <i>{esc(current)}</i>")
+        await ctx.to_owner(f"{e('note')} Заметка о {esc(ctx.peer_name)}: <i>{esc(current)}</i>")
         return
     if text.strip() in ("-", "снять", "убрать"):
         await db.set_note(ctx.owner_id, ctx.chat_id, None)
         await ctx.drop_command()
-        await ctx.to_owner("📝 Заметка снята.")
+        await ctx.to_owner(f"{e('note')} Заметка снята.")
         return
     await db.set_note(ctx.owner_id, ctx.chat_id, text[:500])
     await ctx.drop_command()
     # Заметка — вещь для себя, собеседнику её видеть незачем, поэтому
     # подтверждение уходит в личку, а в чате не остаётся ничего.
-    await ctx.to_owner(f"📝 Записал о {esc(ctx.peer_name)}: <i>{esc(text[:500])}</i>")
+    await ctx.to_owner(f"{e('note')} Записал о {esc(ctx.peer_name)}: <i>{esc(text[:500])}</i>")
 
 
 # --------------------------------------------------------------------------
@@ -122,26 +131,77 @@ async def cmd_note(ctx: Ctx) -> None:
 
 
 @command(
-    "глушь", "мут",
+    "мут", "глушь",
     group="диалог",
-    about="глухой режим: сообщения удаляются, текст — вам в личку",
+    about="мут: его сообщения удаляются, текст приходит вам; в чате — «… в муте»",
+    usage="[время]",
+    example="30м",
     needs=("can_delete_all_messages",),
 )
 async def cmd_mute(ctx: Ctx) -> None:
-    await db.set_muted(ctx.owner_id, ctx.chat_id, True)
-    await ctx.drop_command()
+    span = timers.parse_span(ctx.args) if ctx.args.strip() else None
+    if ctx.args.strip() and span is None:
+        await ctx.fail(
+            "не понял срок. Примеры: <code>.мут 30м</code>, <code>.мут 2ч</code>, "
+            "<code>.мут 1д</code> или просто <code>.мут</code> — до снятия"
+        )
+        return
+    until = int(time.time()) + span if span else 0
+    await db.set_muted(ctx.owner_id, ctx.chat_id, True, until)
+    words = timers.span_words(span) if span else None
+    await ctx.replace(texts.mute_public(ctx.peer_name, words), html=True)
+    how_long = f"на <b>{words}</b>" if words else "до снятия"
     await ctx.to_owner(
-        f"🔇 <b>{esc(ctx.peer_name)}</b> в глухом режиме.\n\n"
-        "Его сообщения будут удаляться из чата, а текст приходить сюда. "
-        "Снять — <code>.разглушь</code> в том же чате."
+        f"{e('mute')} <b>{esc(ctx.peer_name)}</b> в муте {how_long}.\n\n"
+        "Его сообщения будут удаляться из чата, а текст и файлы — приходить "
+        "сюда. Снять раньше — <code>.размут</code> в том же чате или "
+        "<code>.муты</code> здесь."
     )
 
 
-@command("разглушь", "размут", group="диалог", about="снять глухой режим")
+@command("размут", "разглушь", group="диалог", about="снять мут — в чате будет «… больше не в муте»")
 async def cmd_unmute(ctx: Ctx) -> None:
+    chat = await db.chat_of(ctx.owner_id, ctx.chat_id)
+    if not chat["muted"]:
+        await ctx.fail(f"{esc(ctx.peer_name)} и так не в муте")
+        return
     await db.set_muted(ctx.owner_id, ctx.chat_id, False)
+    await ctx.replace(texts.unmute_public(ctx.peer_name), html=True)
+
+
+@command("муты", "глухие", group="диалог", about="кто сейчас в муте — список вам в личку")
+async def cmd_mutes(ctx: Ctx) -> None:
     await ctx.drop_command()
-    await ctx.to_owner(f"🔊 <b>{esc(ctx.peer_name)}</b> снова пишет обычно.")
+    rows = await db.muted_chats(ctx.owner_id)
+    if not rows:
+        await ctx.to_owner(f"{e('volume')} Сейчас в муте никого нет.")
+        return
+    now = int(time.time())
+    lines = [f"{e('mute')} <b>В муте</b> · {len(rows)}", ""]
+    for row in rows:
+        left = (
+            f"ещё {timers.span_words(row['muted_until'] - now)}"
+            if row["muted_until"]
+            else "до снятия"
+        )
+        name = esc(row["title"] or row["chat_id"])
+        lines.append(f'{e("dots")} <a href="tg://user?id={row["chat_id"]}">{name}</a> — {left}')
+    lines += ["", "<i>Снять — <code>.размут</code> в чате с человеком.</i>"]
+    await ctx.to_owner("\n".join(lines))
+
+
+@command("свой", "доверяю", group="диалог", about="доверенный чат: антискам его не трогает")
+async def cmd_trust(ctx: Ctx) -> None:
+    chat = await db.chat_of(ctx.owner_id, ctx.chat_id)
+    new = not chat["trusted"]
+    await db.set_trusted(ctx.owner_id, ctx.chat_id, new)
+    await ctx.drop_command()
+    await ctx.to_owner(
+        f"{e('shield_check')} <b>{esc(ctx.peer_name)}</b> — доверенный, антискам "
+        "его больше не проверяет."
+        if new
+        else f"{e('shield')} <b>{esc(ctx.peer_name)}</b> снова проверяется антискамом."
+    )
 
 
 @command("тихо", "молчи", group="диалог", about="не отвечать автоответами в этом чате")
@@ -151,7 +211,7 @@ async def cmd_ignore(ctx: Ctx) -> None:
     await db.set_ignored(ctx.owner_id, ctx.chat_id, new)
     await ctx.drop_command()
     await ctx.to_owner(
-        f"{'🔕' if new else '🔔'} Автоответы в чате с <b>{esc(ctx.peer_name)}</b> "
+        f"{e('bell_off') if new else e('bell')} Автоответы в чате с <b>{esc(ctx.peer_name)}</b> "
         f"{'выключены' if new else 'включены'}."
     )
 
@@ -216,7 +276,7 @@ async def cmd_purge(ctx: Ctx) -> None:
                 gone += 1
             except TelegramAPIError:
                 continue
-    await ctx.to_owner(f"🧹 Убрано сообщений: <b>{gone}</b> из {len(ids)}.")
+    await ctx.to_owner(f"{e('trash')} Убрано сообщений: <b>{gone}</b> из {len(ids)}.")
 
 
 @command("прочти", "прочитано", group="диалог", about="отметить чат прочитанным")
@@ -230,7 +290,7 @@ async def cmd_read(ctx: Ctx) -> None:
             message_id=target,
         )
     except TelegramAPIError as err:
-        await ctx.to_owner(f"⚠️ не отметилось прочитанным: {err}")
+        await ctx.to_owner(f"{e('warning')} не отметилось прочитанным: {err}")
 
 
 # --------------------------------------------------------------------------
@@ -238,7 +298,13 @@ async def cmd_read(ctx: Ctx) -> None:
 # --------------------------------------------------------------------------
 
 
-@command("отошел", "афк", group="диалог", about="включить режим «отошёл»", usage="[текст]")
+@command(
+    "отошел", "афк",
+    group="диалог",
+    about="режим «отошёл»: всем, кто напишет, уйдёт этот текст",
+    usage="[текст]",
+    example="на паре до 15:00",
+)
 async def cmd_afk(ctx: Ctx) -> None:
     text = ctx.text()
     if text:
@@ -247,7 +313,7 @@ async def cmd_afk(ctx: Ctx) -> None:
     await ctx.drop_command()
     st = await db.settings_of(ctx.owner_id)
     await ctx.to_owner(
-        "🌙 Режим «отошёл» включён. Всем, кто напишет, уйдёт:\n\n"
+        f"{e('pause')} Режим «отошёл» включён. Всем, кто напишет, уйдёт:\n\n"
         f"<i>{esc(st['away_text'])}</i>\n\nВернуться — <code>.вернулся</code>"
     )
 
@@ -256,7 +322,7 @@ async def cmd_afk(ctx: Ctx) -> None:
 async def cmd_back(ctx: Ctx) -> None:
     await db.set_setting(ctx.owner_id, "away", 0)
     await ctx.drop_command()
-    await ctx.to_owner("☀️ Режим «отошёл» выключен.")
+    await ctx.to_owner(f"{e('play')} Режим «отошёл» выключен.")
 
 
 @command("почему", "разбор", group="диалог", about="почему бот промолчал или ответил")
@@ -265,7 +331,7 @@ async def cmd_why(ctx: Ctx) -> None:
     seen = state.last(ctx.owner_id, ctx.chat_id)
     if seen is None:
         await ctx.to_owner(
-            "🤔 По этому чату решений пока не было — бот ещё не получал "
+            f"{e('question')} По этому чату решений пока не было — бот ещё не получал "
             "здесь входящих после запуска."
         )
         return
@@ -282,13 +348,19 @@ async def cmd_why(ctx: Ctx) -> None:
         "game": "принял как ход в игре",
     }
     await ctx.to_owner(
-        f"🤔 Последнее решение по чату с <b>{esc(ctx.peer_name)}</b> "
+        f"{e('question')} Последнее решение по чату с <b>{esc(ctx.peer_name)}</b> "
         f"({ago} с назад):\n\n<b>{titles.get(kind, kind)}</b>"
         + (f"\n<i>{esc(reason)}</i>" if reason else "")
     )
 
 
-@command("правило", "прав", group="диалог", about="добавить правило автоответа", usage="слова = ответ")
+@command(
+    "правило", "прав",
+    group="диалог",
+    about="добавить правило автоответа",
+    usage="слова = ответ",
+    example="цена|прайс = скину вечером",
+)
 async def cmd_rule(ctx: Ctx) -> None:
     raw = ctx.text()
     if "=" not in raw:
@@ -306,7 +378,7 @@ async def cmd_rule(ctx: Ctx) -> None:
     )
     await ctx.drop_command()
     await ctx.to_owner(
-        f"📋 Правило #{rule_id} добавлено:\n<code>{esc(engine.SEP.join(parts))}</code>\n"
+        f"{e('checklist')} Правило #{rule_id} добавлено:\n<code>{esc(engine.SEP.join(parts))}</code>\n"
         f"→ {esc(reply.strip()[:900])}"
     )
 
@@ -316,7 +388,13 @@ async def cmd_rule(ctx: Ctx) -> None:
 # --------------------------------------------------------------------------
 
 
-@command("запомни", "шаб", group="диалог", about="сохранить заготовку", usage="имя = текст")
+@command(
+    "запомни", "шаб",
+    group="диалог",
+    about="сохранить заготовку текста",
+    usage="имя = текст",
+    example="прайс = стрижка 1500, борода 800",
+)
 async def cmd_remember(ctx: Ctx) -> None:
     raw = ctx.text()
     if "=" not in raw:
@@ -331,12 +409,12 @@ async def cmd_remember(ctx: Ctx) -> None:
     await db.set_snip(ctx.owner_id, name, body[:900])
     await ctx.drop_command()
     await ctx.to_owner(
-        f"💾 Заготовка <code>{esc(name)}</code> сохранена.\n"
+        f"{e('save')} Заготовка <code>{esc(name)}</code> сохранена.\n"
         f"Вставить в любом чате: <code>.вставь {esc(name)}</code>"
     )
 
 
-@command("вставь", "заготовка", group="диалог", about="вставить заготовку", usage="имя")
+@command("вставь", "заготовка", group="диалог", about="вставить заготовку", usage="имя", example="прайс")
 async def cmd_snip(ctx: Ctx) -> None:
     name = ctx.text().strip().lower()
     if not name:
@@ -357,12 +435,12 @@ async def cmd_snips(ctx: Ctx) -> None:
     rows = await db.snips_of(ctx.owner_id)
     if not rows:
         await ctx.to_owner(
-            "💾 Заготовок нет.\n\nСохранить: "
+            f"{e('save')} Заготовок нет.\n\nСохранить: "
             "<code>.запомни прайс = стрижка 1500</code>\n"
             "Вставить: <code>.вставь прайс</code>"
         )
         return
-    lines = ["💾 <b>Заготовки</b>", ""]
+    lines = [f"{e('save')} <b>Заготовки</b>", ""]
     for row in rows:
         used = f" · вставлено {row['used']}" if row["used"] else ""
         lines.append(
@@ -372,22 +450,22 @@ async def cmd_snips(ctx: Ctx) -> None:
     await ctx.to_owner("\n".join(lines))
 
 
-@command("помощь", "команды", "хелп", group="служба", about="список команд — вам в личку")
+@command("помощь", "команды", "хелп", group="служба", about="справка по командам — вам в личку")
 async def cmd_help(ctx: Ctx) -> None:
     import cmdbase
+    import keyboards
 
     await ctx.drop_command()
     prefix = ctx.settings["prefix"] or "."
-    for page in cmdbase.help_pages(prefix):
-        await ctx.to_owner(page)
+    await ctx.to_owner(cmdbase.help_overview(prefix), reply_markup=keyboards.help_menu())
     if not ctx.dropped:
         await ctx.to_owner(
-            "⚠️ Сообщение с командой осталось в чате: боту не выдано право "
-            "«удалять мои сообщения» в «Автоматизации чатов»."
+            f"{e('warning')} Сообщение с командой осталось в чате: боту не выдано "
+            "право «удалять мои сообщения» в «Автоматизации чатов»."
         )
 
 
-@command("префикс", "знак", group="служба", about="сменить префикс команд", usage="символ")
+@command("префикс", "знак", group="служба", about="сменить префикс команд", usage="символ", example="!")
 async def cmd_prefix(ctx: Ctx) -> None:
     new = ctx.text().strip()
     if len(new) != 1 or new.isalnum():
@@ -395,7 +473,7 @@ async def cmd_prefix(ctx: Ctx) -> None:
         return
     await db.set_setting(ctx.owner_id, "prefix", new)
     await ctx.drop_command()
-    await ctx.to_owner(f"Префикс команд теперь <code>{esc(new)}</code>")
+    await ctx.to_owner(f"{e('check')} Префикс команд теперь <code>{esc(new)}</code>")
 
 
 _OPS = {
@@ -440,7 +518,7 @@ def calc(expression: str) -> float:
     return walk(tree)
 
 
-@command("посчитай", "калк", group="служба", about="калькулятор", usage="2+2*10")
+@command("посчитай", "калк", group="служба", about="калькулятор", usage="выражение", example="(2+2)*10")
 async def cmd_calc(ctx: Ctx) -> None:
     expression = ctx.text()
     if not expression:
@@ -452,17 +530,17 @@ async def cmd_calc(ctx: Ctx) -> None:
         await ctx.fail(f"не посчиталось: {esc(err)}")
         return
     pretty = f"{value:.10g}"
-    await ctx.replace(f"{esc(expression)} = <b>{pretty}</b>", html=True)
+    await ctx.replace(f"{e('code')}{esc(expression)} = <b>{pretty}</b>", html=True)
 
 
 @command("пинг", "отклик", group="служба", about="задержка до Telegram")
 async def cmd_ping(ctx: Ctx) -> None:
     started = time.perf_counter()
     await ctx.drop_command()
-    message = await ctx.send("🏓")
+    message = await ctx.send(f"{e('wifi')} …", html=True)
     delay = (time.perf_counter() - started) * 1000
     if message is not None:
-        await ctx.edit(message, f"🏓 {delay:.0f} мс")
+        await ctx.edit(message, f"{e('wifi')} <b>{delay:.0f} мс</b>", html=True)
 
 
 @command("время", "часы", group="служба", about="текущее время")
@@ -471,7 +549,10 @@ async def cmd_time(ctx: Ctx) -> None:
     # формата уходит в системную функцию и на Windows кодируется
     # локалью, где эмодзи попросту нет — команда падала на ней целиком.
     now = datetime.now()
-    await ctx.replace(f"🕒 {now.strftime('%H:%M:%S')} · {now.strftime('%d.%m.%Y')}")
+    await ctx.replace(
+        f"{e('clock')} <b>{now.strftime('%H:%M:%S')}</b> · {now.strftime('%d.%m.%Y')}",
+        html=True,
+    )
 
 
 @command("сводка", "статистика", group="служба", about="сводка по всем чатам")

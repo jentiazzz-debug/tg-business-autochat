@@ -31,6 +31,8 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Message
 
 import config
+import pe
+from pe import e
 
 log = logging.getLogger("autochat.cmd")
 
@@ -188,7 +190,7 @@ class Ctx:
         тихо исчезает, а объяснение уходит в личку.
         """
         await self.drop_command()
-        await self.to_owner(f"⚠️ <code>{self.args_head()}</code> — {why}")
+        await self.to_owner(f"{e('warning')} <code>{self.args_head()}</code> — {why}")
 
     def args_head(self) -> str:
         import html as _h
@@ -210,6 +212,9 @@ class Cmd:
     needs: tuple[str, ...] = ()
     #: Показывать в справке (служебные псевдонимы прячем).
     listed: bool = True
+    #: Пример для справки — аргументы после имени команды. Пусто — пример
+    #: не показывается.
+    example: str = ""
 
     @property
     def name(self) -> str:
@@ -221,24 +226,28 @@ ORDER: list[Cmd] = []
 
 #: Порядок разделов в справке.
 GROUPS = (
+    "след",
+    "диалог",
+    "время",
     "слово",
     "кадры",
     "азарт",
-    "диалог",
     "личина",
     "картинка",
     "служба",
 )
 
-#: Как раздел выглядит в справке: значок и человеческая подпись.
+#: Как раздел выглядит в справке: иконка из пака, подпись, пояснение.
 GROUP_TITLES = {
-    "слово": ("✒️", "Слово", "как выглядит написанное"),
-    "кадры": ("🎬", "Кадры", "текст, который двигается"),
-    "азарт": ("🎲", "Азарт", "игры на двоих и рандом"),
-    "диалог": ("💬", "Диалог", "управление перепиской"),
-    "личина": ("🎭", "Личина", "имя, аватар, подарки"),
-    "картинка": ("🖼", "Картинка", "обработка фото"),
-    "служба": ("⚙️", "Служба", "всё остальное"),
+    "след": ("eye", "След", "удалённое, правки, сохранить себе"),
+    "диалог": ("chats", "Диалог", "мут, досье, уборка, автоответчик"),
+    "время": ("alarm", "Время", "напоминания и отложенные сообщения"),
+    "слово": ("edit", "Слово", "как выглядит написанное"),
+    "кадры": ("video", "Кадры", "текст, который двигается"),
+    "азарт": ("target", "Азарт", "игры на двоих и рандом"),
+    "личина": ("avatar", "Личина", "имя, аватар, подарки"),
+    "картинка": ("image", "Картинка", "обработка фото"),
+    "служба": ("gear", "Служба", "всё остальное"),
 }
 
 
@@ -249,6 +258,7 @@ def command(
     usage: str = "",
     needs: Iterable[str] = (),
     listed: bool = True,
+    example: str = "",
 ) -> Callable[[Runner], Runner]:
     """Зарегистрировать команду под всеми её именами."""
 
@@ -261,6 +271,7 @@ def command(
             usage=usage,
             needs=tuple(needs),
             listed=listed,
+            example=example,
         )
         for name in names:
             if name in REGISTRY:
@@ -314,38 +325,103 @@ def _plural(n: int) -> str:
     return "команд"
 
 
-def help_pages(prefix: str = ".") -> list[str]:
-    """Справка по разделам, готовая к отправке.
+#: Сколько символов кладём в одно сообщение справки. Лимит Telegram —
+#: 4096 видимых символов, а теги иконок в него не входят; запас нужен
+#: под заголовок страницы.
+PAGE_LIMIT = 3300
 
-    Разбивается на сообщения по 3500 символов: команд много, а лимит
-    Telegram на одно сообщение — 4096.
-    """
-    pages: list[str] = []
-    current = [
-        f"<b>{BRAND} · команды</b>",
-        f"<i>{len(ORDER)} {_plural(len(ORDER))}, набираются прямо в переписке</i>",
+
+def group_title(group: str) -> tuple[str, str, str]:
+    return GROUP_TITLES.get(group, ("dots", group.capitalize(), ""))
+
+
+def listed(group: str) -> list[Cmd]:
+    return [c for c in ORDER if c.group == group and c.listed]
+
+
+def help_overview(prefix: str = ".") -> str:
+    """Первый экран справки: как работают команды и какие есть разделы."""
+    total = sum(1 for c in ORDER if c.listed)
+    lines = [
+        f"{e('code')} <b>{BRAND} · команды</b>",
+        f"<i>{total} {_plural(total)} прямо в ваших личных чатах</i>",
         "",
+        f"{e('info')} <b>Как это работает</b>",
+        f"Пишете в любом чате <code>{prefix}команда</code> — бот убирает её и "
+        "ставит на её место результат. Со стороны выглядит так, будто вы "
+        "сразу так и написали.",
+        "",
+        f"{e('lightbulb')} Многие команды работают <b>ответом на сообщение</b>: "
+        f"ответьте на чужое фото и напишите <code>{prefix}сохрани</code>.",
+        f"{e('lock')} Всё служебное (досье, удалённое, заметки) приходит "
+        "<b>сюда, в личку</b> — собеседник этого не видит.",
+        "",
+        f"{e('menu')} <b>Разделы</b>",
     ]
-    size = 80
-
     for group in GROUPS:
-        items = [c for c in ORDER if c.group == group and c.listed]
+        items = listed(group)
         if not items:
             continue
-        icon, title, hint = GROUP_TITLES.get(group, ("▫️", group.capitalize(), ""))
-        block = [f"{icon} <b>{title.upper()}</b>  <i>{hint}</i>"]
-        for cmd in items:
-            names = " · ".join(f"<code>{prefix}{n}</code>" for n in cmd.names)
-            usage = f" {cmd.usage}" if cmd.usage else ""
-            block.append(f"{names}{usage} — {cmd.about}")
-        block.append("")
-        chunk = "\n".join(block)
-        if size + len(chunk) > 3500:
-            pages.append("\n".join(current))
-            current, size = [], 0
-        current.append(chunk)
-        size += len(chunk)
+        icon, title, hint = group_title(group)
+        lines.append(f"{e(icon)} <b>{title}</b> · {len(items)} — <i>{hint}</i>")
+    lines += [
+        "",
+        f"{e('star')} <b>Самое нужное</b>",
+        f"<code>{prefix}мут 30м</code> — заглушить собеседника на 30 минут",
+        f"<code>{prefix}удалённые</code> — что он удалил в этом чате",
+        f"<code>{prefix}досье</code> — кто это и как себя ведёт",
+        f"<code>{prefix}напомни 1ч позвонить</code> — напоминание вам",
+        "",
+        "<i>Выберите раздел кнопкой ниже.</i>",
+    ]
+    return "\n".join(lines)
 
-    if current:
-        pages.append("\n".join(current))
+
+def _cmd_block(cmd: Cmd, prefix: str) -> str:
+    import html as _h
+
+    head = f"<code>{prefix}{cmd.names[0]}</code>"
+    if cmd.usage:
+        head += f" <i>{_h.escape(cmd.usage, quote=False)}</i>"
+    if len(cmd.names) > 1:
+        head += " · " + " · ".join(f"<code>{prefix}{n}</code>" for n in cmd.names[1:])
+    block = f"{head}\n{cmd.about}"
+    if cmd.example:
+        block += f"\n{e('chevron_right')} <code>{prefix}{cmd.names[0]} {_h.escape(cmd.example, quote=False)}</code>"
+    if cmd.needs:
+        rights = ", ".join(RIGHT_TITLES.get(r, r) for r in cmd.needs)
+        block += f"\n<i>нужно право: {rights}</i>"
+    return block
+
+
+def help_section(group: str, prefix: str = ".") -> list[str]:
+    """Страницы одного раздела — по PAGE_LIMIT символов."""
+    icon, title, hint = group_title(group)
+    items = listed(group)
+    head = (
+        f"{e(icon)} <b>{title.upper()}</b> · {len(items)} {_plural(len(items))}\n"
+        f"<i>{hint}</i>\n"
+    )
+    pages: list[str] = []
+    current: list[str] = [head]
+    size = len(pe.strip(head))
+    for cmd in items:
+        block = _cmd_block(cmd, prefix)
+        visible = len(pe.strip(block)) + 2
+        if size + visible > PAGE_LIMIT and len(current) > 1:
+            pages.append("\n\n".join(current))
+            current = [f"{e(icon)} <b>{title.upper()}</b> · продолжение\n"]
+            size = 40
+        current.append(block)
+        size += visible
+    pages.append("\n\n".join(current))
+    return pages
+
+
+def help_pages(prefix: str = ".") -> list[str]:
+    """Вся справка подряд: обзор и все разделы."""
+    pages = [help_overview(prefix)]
+    for group in GROUPS:
+        if listed(group):
+            pages += help_section(group, prefix)
     return pages

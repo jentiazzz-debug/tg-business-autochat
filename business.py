@@ -48,6 +48,7 @@ import db
 import engine
 import guard
 import keyboards
+import subs
 import state
 import texts
 
@@ -169,8 +170,35 @@ async def ensure_connection(bot: Bot, conn_id: str | None) -> Any | None:
         rights=rights,
         username=conn.user.username,
         name=conn.user.full_name,
+        bot_id=bot.id,
     )
     return await db.connection_by_id(conn_id)
+
+
+async def subscribed(bot: Bot, row: Any) -> bool:
+    """Обязательная подписка для бизнес-функций.
+
+    Без подписки бот в чатах владельца не работает: ни след, ни
+    антискам, ни команды. Напоминание — в личку, не чаще NAG_EVERY.
+    """
+    owner_id = int(row["owner_id"])
+    need = await subs.missing(owner_id)
+    if not need:
+        return True
+    if subs.should_nag(owner_id):
+        from handlers import subscribe_text
+
+        try:
+            await bot.send_message(
+                row["user_chat_id"],
+                subscribe_text(need)
+                + "\n\n<i>Пока подписки нет, бот в ваших чатах на паузе: "
+                "удалённое не сохраняется, команды не работают.</i>",
+                reply_markup=keyboards.subscribe(need),
+            )
+        except TelegramAPIError:
+            pass
+    return False
 
 
 @router.business_connection()
@@ -195,6 +223,7 @@ async def on_connection(event: BusinessConnection, bot: Bot) -> None:
         rights=rights,
         username=event.user.username,
         name=event.user.full_name,
+        bot_id=bot.id,
     )
     st = await db.settings_of(event.user.id)
     log.info(
@@ -220,7 +249,7 @@ async def on_connection(event: BusinessConnection, bot: Bot) -> None:
 async def on_business_message(message: Message, bot: Bot) -> None:
     """Главная развилка: сообщение в личном чате владельца."""
     row = await ensure_connection(bot, message.business_connection_id)
-    if row is None:
+    if row is None or not await subscribed(bot, row):
         return
     owner_id = int(row["owner_id"])
     chat_id = message.chat.id
@@ -493,7 +522,7 @@ async def _notify_new(
 async def on_edited(message: Message, bot: Bot) -> None:
     """Собеседник поправил сообщение — показать, что было и что стало."""
     row = await ensure_connection(bot, message.business_connection_id)
-    if row is None:
+    if row is None or not await subscribed(bot, row):
         return
     owner_id = int(row["owner_id"])
     if getattr(message, "sender_business_bot", None) is not None:
@@ -515,6 +544,9 @@ async def on_edited(message: Message, bot: Bot) -> None:
     if before == text:
         return
     await db.bump_chat(owner_id, message.chat.id, "edited")
+    await db.add_trail(
+        owner_id, message.chat.id, "edit", kind=old["kind"], text=text, before=before
+    )
     if not st["spy_edits"]:
         return
 
@@ -536,7 +568,7 @@ async def on_edited(message: Message, bot: Bot) -> None:
 async def on_deleted(event: BusinessMessagesDeleted, bot: Bot) -> None:
     """Сообщения удалили — достать их из архива и показать владельцу."""
     row = await ensure_connection(bot, event.business_connection_id)
-    if row is None:
+    if row is None or not await subscribed(bot, row):
         return
     owner_id = int(row["owner_id"])
     st = await db.settings_of(owner_id)
@@ -550,6 +582,15 @@ async def on_deleted(event: BusinessMessagesDeleted, bot: Bot) -> None:
         return
 
     await db.bump_chat(owner_id, event.chat.id, "deleted", len(rows))
+    for item in rows:
+        await db.add_trail(
+            owner_id,
+            event.chat.id,
+            "del",
+            kind=item["kind"],
+            text=item["text"],
+            file_id=item["file_id"],
+        )
     chat = await db.chat_of(owner_id, event.chat.id)
     name = (
         getattr(event.chat, "full_name", None)

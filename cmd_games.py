@@ -31,6 +31,7 @@ from aiogram.exceptions import TelegramAPIError
 import db
 import games
 from cmdbase import Ctx, command
+from pe import e
 
 #: Сколько ждать, пока Telegram доиграет анимацию броска.
 ROLL_PAUSE = 3.8
@@ -138,13 +139,14 @@ for _key, (_emoji, _note, _names) in ROLLS.items():
 @command("монетка", "орел", group="азарт", about="подбросить монетку")
 async def cmd_coin(ctx: Ctx) -> None:
     await ctx.drop_command()
-    message = await ctx.send("🪙 Крутится…")
-    result = random.choice(games.COIN)
+    message = await ctx.send(f"{e('coin')} Крутится…", html=True)
+    # Слово без эмодзи из games.COIN: иконка монеты уже стоит впереди.
+    result = f"{e('coin')} <b>{random.choice(games.COIN).split()[0]}</b>"
     if message is not None:
         await asyncio.sleep(1.2)
-        await ctx.edit(message, result)
+        await ctx.edit(message, result, html=True)
     else:
-        await ctx.send(result)
+        await ctx.send(result, html=True)
 
 
 @command("рандом", "число", group="азарт", about="случайное число", usage="[до] | [от до]")
@@ -158,7 +160,7 @@ async def cmd_rand(ctx: Ctx) -> None:
         low, high = 1, 100
     if low > high:
         low, high = high, low
-    await ctx.replace(f"🎲 {random.randint(low, high)}  <i>({low}–{high})</i>", html=True)
+    await ctx.replace(f"{e('target')} <b>{random.randint(low, high)}</b>  <i>({low}–{high})</i>", html=True)
 
 
 @command("выбери", "выбор", group="азарт", about="выбрать из вариантов", usage="а | б | в")
@@ -173,7 +175,7 @@ async def cmd_choose(ctx: Ctx) -> None:
     import html as _h
 
     pick = random.choice(options)
-    await ctx.replace(f"🤔 {_h.escape(pick, quote=False)}", html=True)
+    await ctx.replace(f"{e('check')} <b>{_h.escape(pick, quote=False)}</b>", html=True)
 
 
 @command("шар", "оракул", group="азарт", about="магический шар", usage="вопрос")
@@ -182,7 +184,7 @@ async def cmd_ball(ctx: Ctx) -> None:
     if not question:
         await ctx.fail("задайте вопрос")
         return
-    await ctx.replace(f"🔮 {random.choice(games.BALL)}")
+    await ctx.replace(f"{e('magic')} <b>{random.choice(games.BALL)}</b>", html=True)
 
 
 @command("шанс", "процент", group="азарт", about="вероятность события", usage="вопрос")
@@ -193,7 +195,7 @@ async def cmd_chance(ctx: Ctx) -> None:
         return
     percent = games.chance(question)
     await ctx.replace(
-        f"📊 <b>{percent}%</b>\n<code>{games.bar(percent)}</code>", html=True
+        f"{e('percent')} <b>{percent}%</b>\n<code>{games.bar(percent)}</code>", html=True
     )
 
 
@@ -204,7 +206,7 @@ async def cmd_who(ctx: Ctx) -> None:
     question = ctx.text()
     pick = random.choice((ctx.owner_name, ctx.peer_name))
     tail = f"\n<i>{_h.escape(question, quote=False)}</i>" if question else ""
-    await ctx.replace(f"👉 <b>{_h.escape(pick, quote=False)}</b>{tail}", html=True)
+    await ctx.replace(f"{e('user')} <b>{_h.escape(pick, quote=False)}</b>{tail}", html=True)
 
 
 @command("когда", "срок", group="азарт", about="когда это случится", usage="вопрос")
@@ -214,7 +216,7 @@ async def cmd_when(ctx: Ctx) -> None:
         "в этом году", "когда-нибудь", "уже случилось", "никогда",
         "как только перестанешь спрашивать", "после дождичка в четверг",
     )
-    await ctx.replace(f"📅 {random.choice(answers)}")
+    await ctx.replace(f"{e('calendar')} <b>{random.choice(answers)}</b>", html=True)
 
 
 @command("рулетка", "барабан", group="азарт", about="шуточная рулетка без ставок")
@@ -233,7 +235,7 @@ async def cmd_roulette(ctx: Ctx) -> None:
 @command("дуэль", "поединок", group="азарт", about="дуэль на очки со счётом по чату")
 async def cmd_duel(ctx: Ctx) -> None:
     await ctx.drop_command()
-    message = await ctx.send("⚔️ Дуэль! Считаем до трёх…")
+    message = await ctx.send(f"{e('target')} Дуэль! Считаем до трёх…", html=True)
     await asyncio.sleep(1.8)
     owner_won = random.random() < 0.5
     win, lose = (
@@ -242,7 +244,7 @@ async def cmd_duel(ctx: Ctx) -> None:
     await db.bump_score(ctx.owner_id, ctx.chat_id, "duel", "win" if owner_won else "loss")
     score = await db.score_of(ctx.owner_id, ctx.chat_id, "duel")
     story = games.duel_story(win, lose)
-    tail = f"\n\n<i>Счёт в этом чате — {score['wins']}:{score['losses']}</i>"
+    tail = f"\n\n{e('trophy')} <i>Счёт в этом чате — {score['wins']}:{score['losses']}</i>"
     if message is not None and await ctx.edit(message, story + tail, html=True):
         return
     await ctx.send(story + tail, html=True)

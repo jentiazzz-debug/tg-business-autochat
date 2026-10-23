@@ -18,8 +18,23 @@ from typing import Callable
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BufferedInputFile
 
-import imaging
 from cmdbase import Ctx, command
+
+
+def _lazy(name: str) -> Callable[..., bytes]:
+    """Фильтр из imaging без импорта Pillow на старте.
+
+    Pillow весит десятки мегабайт в памяти, а картиночные команды
+    зовут редко — пусть он грузится при первом вызове, а не в каждом
+    процессе бота навсегда.
+    """
+
+    def run(*args, **kwargs):
+        import imaging
+
+        return getattr(imaging, name)(*args, **kwargs)
+
+    return run
 
 log = logging.getLogger("autochat.media")
 
@@ -86,13 +101,13 @@ def _make(effect: Callable[[bytes], bytes], caption: str):
 
 
 EFFECT_COMMANDS = (
-    (("шакал", "жмых"), imaging.shakal, "шакал"),
-    (("прожарь", "жар"), imaging.deepfry, "прожарка"),
-    (("пиксели", "мыло"), imaging.pixelate, "пиксели"),
-    (("чернобел", "чб"), imaging.grayscale, "ч/б"),
-    (("негатив", "инверт"), imaging.invert, "негатив"),
-    (("отрази", "зеркало"), imaging.mirror, "зеркало"),
-    (("размой", "туман"), imaging.blur, "размытие"),
+    (("шакал", "жмых"), _lazy("shakal"), "шакал"),
+    (("прожарь", "жар"), _lazy("deepfry"), "прожарка"),
+    (("пиксели", "мыло"), _lazy("pixelate"), "пиксели"),
+    (("чернобел", "чб"), _lazy("grayscale"), "ч/б"),
+    (("негатив", "инверт"), _lazy("invert"), "негатив"),
+    (("отрази", "зеркало"), _lazy("mirror"), "зеркало"),
+    (("размой", "туман"), _lazy("blur"), "размытие"),
 )
 
 for _names, _effect, _title in EFFECT_COMMANDS:
@@ -109,7 +124,7 @@ async def cmd_sticker(ctx: Ctx) -> None:
     if data is None:
         return
     try:
-        webp = await asyncio.to_thread(imaging.sticker, data)
+        webp = await asyncio.to_thread(_lazy("sticker"), data)
     except Exception as err:  # noqa: BLE001
         await ctx.fail(f"не собрался стикер: {err}")
         return

@@ -19,7 +19,9 @@ import cmd_games  # noqa: F401
 import cmd_media  # noqa: F401
 import cmd_profile  # noqa: F401
 import cmd_text  # noqa: F401
+import cmd_trail  # noqa: F401
 import cmdbase
+import pe
 from cmdbase import Ctx, RIGHT_TITLES
 
 log = logging.getLogger("autochat.commands")
@@ -103,5 +105,7 @@ async def handle(
         # чате уже может лежать удалённое сообщение, и падение здесь
         # оставит его без ответа и без объяснения.
         log.exception("команда %s упала: %s", cmd.name, err)
-        await ctx.to_owner(f"⚠️ команда <code>{cmd.name}</code> сломалась: {err}")
+        await ctx.to_owner(
+            f"{pe.e('warning')} команда <code>{cmd.name}</code> сломалась: {err}"
+        )
     return cmd.name

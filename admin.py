@@ -19,12 +19,20 @@
   InlineKeyboardButton нет поля цвета — кнопку рисует клиент по своей
   теме. Единственный честный способ «покрасить» её — кружок в подписи:
   🟢 🔵 🔴. Именно это и делает выбор цвета ниже.
-* <b>Премиум-эмодзи внутрь кнопки не вставить.</b> Текст кнопки —
-  простая строка без entities, и любой custom_emoji там останется
-  обычным эмодзи. В тексте сообщения они работают.
-* Премиум-эмодзи в тексте бот сможет отправить, только если его
-  юзернейм куплен на Fragment — это ограничение Telegram на
-  custom_emoji для ботов, обойти его нельзя.
+* Премиум-эмодзи бот может отправлять, если у владельца бота есть
+  Telegram Premium (или юзернейм бота куплен на Fragment). На кнопке —
+  только одна иконка перед текстом (icon_custom_emoji_id), внутри
+  подписи кнопки их нет.
+
+<b>Рассылка идёт по всем ботам</b> — основному и зеркалам: каждый
+человек получает её от того бота, которым пользуется. file_id фото и
+стикера у каждого бота свой, поэтому для зеркала вложение один раз
+скачивается основным ботом и загружается заново, дальше идёт по новому
+file_id.
+
+<b>Спонсоры</b> — каналы обязательной подписки сверх основного. Основной
+бот должен быть в них админом: иначе Telegram не скажет ему, подписан
+ли человек.
 """
 
 from __future__ import annotations
@@ -42,6 +50,7 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -51,6 +60,8 @@ from aiogram.types import (
 import commands
 import config
 import db
+import mirrors
+import subs
 import texts
 
 log = logging.getLogger("autochat.admin")
@@ -60,6 +71,15 @@ router = Router(name="admin")
 # не пропустит никого, и это именно то, что нужно.
 router.message.filter(F.from_user.id.in_(config.ADMIN_IDS))
 router.callback_query.filter(F.from_user.id.in_(config.ADMIN_IDS))
+
+
+def _main_only(event: object, bot: Bot) -> bool:
+    """Админка живёт только в основном боте — в зеркалах её нет."""
+    return mirrors.is_main(bot)
+
+
+router.message.filter(_main_only)
+router.callback_query.filter(_main_only)
 
 #: Ключ баннера в bot_meta — общий с панелью владельца.
 BANNER = db.BANNER_KEY
@@ -83,6 +103,7 @@ class Form(StatesGroup):
     media = State()
     buttons = State()
     banner = State()
+    sponsor = State()
 
 
 @dataclass(slots=True)
@@ -94,6 +115,9 @@ class Draft:
     sticker_id: str = ""
     rows: list[list[tuple[str, str]]] = field(default_factory=list)
     color: str = "none"
+    #: Для зеркал: байты вложения и его file_id в каждом боте.
+    blob: bytes | None = None
+    ids: dict[int, str] = field(default_factory=dict)
 
     def markup(self) -> InlineKeyboardMarkup | None:
         if not self.rows:
@@ -142,6 +166,10 @@ def root_kb(has_banner: bool) -> InlineKeyboardMarkup:
                     callback_data="a:banner",
                 ),
                 InlineKeyboardButton(text="📣 Рассылка", callback_data="a:cast"),
+            ],
+            [
+                InlineKeyboardButton(text="📢 Спонсоры", callback_data="a:sp"),
+                InlineKeyboardButton(text="🤖 Зеркала", callback_data="a:mr"),
             ],
             [InlineKeyboardButton(text="🧾 История рассылок", callback_data="a:hist")],
         ]
@@ -570,19 +598,43 @@ async def on_cast_color(call: CallbackQuery) -> None:
 # --------------------------------------------------------------------------
 
 
+async def _media(bot: Bot, d: Draft, file_id: str) -> str | BufferedInputFile:
+    """Вложение для этого бота: свой file_id или файл заново."""
+    if mirrors.is_main(bot):
+        return file_id
+    if bot.id in d.ids:
+        return d.ids[bot.id]
+    if d.blob is None:
+        main = mirrors.bot_for(0)
+        buf = await main.download(file_id)
+        d.blob = buf.read() if buf is not None else b""
+    name = "sticker.webp" if d.sticker_id else "photo.jpg"
+    return BufferedInputFile(d.blob, filename=name)
+
+
+def _keep(bot: Bot, d: Draft, sent: Message | None) -> None:
+    if mirrors.is_main(bot) or sent is None or bot.id in d.ids:
+        return
+    if sent.photo:
+        d.ids[bot.id] = sent.photo[-1].file_id
+    elif sent.sticker:
+        d.ids[bot.id] = sent.sticker.file_id
+
+
 async def deliver(bot: Bot, chat_id: int, d: Draft) -> str:
     """Отправить одному человеку. Возвращает sent | blocked | failed."""
     markup = d.markup()
     try:
         if d.sticker_id:
-            await bot.send_sticker(chat_id, d.sticker_id)
+            _keep(bot, d, await bot.send_sticker(chat_id, await _media(bot, d, d.sticker_id)))
         if d.photo_id:
+            photo = await _media(bot, d, d.photo_id)
             if d.text and len(d.text) <= 1024:
-                await bot.send_photo(
-                    chat_id, d.photo_id, caption=d.text, reply_markup=markup
-                )
+                _keep(bot, d, await bot.send_photo(
+                    chat_id, photo, caption=d.text, reply_markup=markup
+                ))
                 return "sent"
-            await bot.send_photo(chat_id, d.photo_id)
+            _keep(bot, d, await bot.send_photo(chat_id, photo))
         if d.text:
             await bot.send_message(chat_id, d.text, reply_markup=markup)
         elif markup is not None and not d.photo_id and not d.sticker_id:
@@ -606,9 +658,9 @@ async def on_preview(call: CallbackQuery) -> None:
     result = await deliver(call.bot, call.from_user.id, d)
     if result != "sent":
         await call.message.answer(
-            "⚠️ Предпросмотр не ушёл. Частая причина — премиум-эмодзи в "
-            "тексте: боту разрешают их только с юзернеймом, купленным на "
-            "Fragment. Уберите их или пришлите текст без них."
+            "⚠️ Предпросмотр не ушёл. Если в тексте премиум-эмодзи — "
+            "у владельца бота должен быть Telegram Premium. Уберите их или "
+            "пришлите текст без них."
         )
 
 
@@ -621,10 +673,12 @@ async def on_go(call: CallbackQuery) -> None:
     if _running.get(call.from_user.id):
         await call.answer("Рассылка уже идёт", show_alert=True)
         return
-    people = await db.owner_chats()
+    people = await db.bot_audience()
+    bots = len({int(r["bot_id"]) for r in people})
     await show(
         call,
-        f"📣 Отправить <b>{len(people)}</b> получателям?\n\n"
+        f"📣 Отправить <b>{len(people)}</b> получателям через {bots} "
+        f"{texts.plural(bots, 'бота', 'ботов', 'ботов')}?\n\n"
         "Предпросмотр покажет ровно то, что они увидят. Остановить можно "
         "кнопкой во время отправки — уже отправленное не отзовётся.",
         InlineKeyboardMarkup(
@@ -644,7 +698,7 @@ async def on_run(call: CallbackQuery) -> None:
     if d.empty():
         await call.answer("Черновик пуст", show_alert=True)
         return
-    people = await db.owner_chats()
+    people = [(int(r["bot_id"]), int(r["user_id"])) for r in await db.bot_audience()]
     if not people:
         await call.answer("Получателей нет", show_alert=True)
         return
@@ -671,7 +725,7 @@ async def _broadcast(
     bot: Bot,
     admin_id: int,
     cast_id: int,
-    people: list[int],
+    people: list[tuple[int, int]],
     d: Draft,
     status: Message | None,
 ) -> None:
@@ -714,14 +768,21 @@ async def _broadcast(
             pass
 
     await redraw()
-    for i, chat_id in enumerate(people, 1):
+    for i, (bot_id, chat_id) in enumerate(people, 1):
         if cast_id in _stop:
             break
-        result = await deliver(bot, chat_id, d)
+        via = mirrors.bot_for(bot_id)
+        if bot_id and via.id != bot_id:
+            # Зеркало сейчас не запущено — писать от чужого бота нельзя:
+            # человек его не открывал, Telegram ответит «chat not found».
+            failed += 1
+            continue
+        result = await deliver(via, chat_id, d)
         if result == "sent":
             sent += 1
         elif result == "blocked":
             blocked += 1
+            await db.mark_blocked(bot_id, chat_id)
         else:
             failed += 1
         if i % config.BROADCAST_TICK == 0:
@@ -771,3 +832,140 @@ async def cast_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
     d = draft(message.from_user.id)
     await message.answer(await cast_text(d), reply_markup=cast_kb(d))
+
+
+# --------------------------------------------------------------------------
+# Спонсоры — обязательная подписка сверх основного канала
+# --------------------------------------------------------------------------
+
+
+async def sponsors_view() -> tuple[str, InlineKeyboardMarkup]:
+    rows = await db.sponsors()
+    main = (await subs.channels())[:1]
+    lines = ["📢 <b>Обязательная подписка</b>", ""]
+    if config.REQUIRED_CHANNEL:
+        title = main[0]["title"] if main else f"канал {config.REQUIRED_CHANNEL}"
+        lines.append(f"🔒 Основной: <b>{esc(title)}</b> <i>(всегда, во всех зеркалах)</i>")
+    else:
+        lines.append("<i>Основной канал выключен (REQUIRED_CHANNEL=0).</i>")
+    lines.append("")
+    if rows:
+        lines.append(f"<b>Спонсоры</b> · {len(rows)}")
+        for row in rows:
+            lines.append(f"▫️ {esc(row['title'])} · <code>{row['chat_id']}</code>")
+    else:
+        lines.append("<i>Спонсоров нет.</i>")
+    lines += [
+        "",
+        "<i>Бот должен быть админом в канале спонсора — иначе подписку не "
+        "проверить. Подписка обязательна и в основном боте, и в зеркалах.</i>",
+    ]
+    buttons = [
+        [InlineKeyboardButton(text=f"✖️ {texts.short(r['title'], 28)}", callback_data=f"a:sp:x:{r['chat_id']}")]
+        for r in rows
+    ]
+    buttons.append([InlineKeyboardButton(text="＋ Добавить спонсора", callback_data="a:sp:add")])
+    buttons.append([InlineKeyboardButton(text="‹ Назад", callback_data="a:root")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@router.callback_query(F.data == "a:sp")
+async def on_sponsors(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    text, markup = await sponsors_view()
+    await show(call, text, markup)
+    await call.answer()
+
+
+@router.callback_query(F.data == "a:sp:add")
+async def on_sponsor_add(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(Form.sponsor)
+    await show(
+        call,
+        "📢 <b>Новый спонсор</b>\n\n"
+        "1. Добавьте бота админом в канал (достаточно права приглашать).\n"
+        "2. Пришлите сюда <code>@username</code> канала, его id "
+        "(<code>-100…</code>) или перешлите любой пост из канала.\n\n"
+        "Можно сразу со ссылкой через пробел: <code>-1001234 https://t.me/+abc</code>\n"
+        "Отмена: /cancel",
+        back_kb("a:sp"),
+    )
+    await call.answer()
+
+
+@router.message(Form.sponsor)
+async def got_sponsor(message: Message, state: FSMContext, bot: Bot) -> None:
+    url = ""
+    if message.forward_from_chat is not None:
+        ref: int | str = message.forward_from_chat.id
+    else:
+        parts = (message.text or "").split()
+        if not parts:
+            await message.answer("Пришлите @username, id или пересланный пост.")
+            return
+        raw = parts[0]
+        url = parts[1] if len(parts) > 1 else ""
+        ref = int(raw) if raw.lstrip("-").isdigit() else raw if raw.startswith("@") else "@" + raw.split("/")[-1]
+    try:
+        chat = await bot.get_chat(ref)
+        me = await bot.me()
+        member = await bot.get_chat_member(chat.id, me.id)
+    except TelegramAPIError as err:
+        await message.answer(f"⚠️ Канал не найден или бот в нём не состоит: {esc(err)}")
+        return
+    if member.status not in ("administrator", "creator"):
+        await message.answer("⚠️ Бот в канале не админ — подписку проверить не получится. Сделайте его админом и пришлите снова.")
+        return
+    if not url:
+        if chat.username:
+            url = f"https://t.me/{chat.username}"
+        else:
+            try:
+                url = chat.invite_link or await bot.export_chat_invite_link(chat.id)
+            except TelegramAPIError as err:
+                await message.answer(f"⚠️ Не вышло получить ссылку-приглашение: {esc(err)}. Пришлите её вторым словом.")
+                return
+    await db.add_sponsor(chat.id, chat.title or str(chat.id), url)
+    await state.clear()
+    text, markup = await sponsors_view()
+    await message.answer(f"✅ Добавлен: <b>{esc(chat.title)}</b>\n\n" + text, reply_markup=markup)
+
+
+@router.callback_query(F.data.startswith("a:sp:x:"))
+async def on_sponsor_drop(call: CallbackQuery) -> None:
+    chat_id = int(call.data.rsplit(":", 1)[1])
+    await db.drop_sponsor(chat_id)
+    text, markup = await sponsors_view()
+    await show(call, text, markup)
+    await call.answer("Спонсор убран")
+
+
+# --------------------------------------------------------------------------
+# Зеркала — сводка для админа
+# --------------------------------------------------------------------------
+
+
+@router.callback_query(F.data == "a:mr")
+async def on_mirrors(call: CallbackQuery) -> None:
+    rows = await db.all_mirrors()
+    lines = [
+        "🤖 <b>Зеркала</b>",
+        f"<i>всего {len(rows)} · работают {mirrors.running()}</i>",
+        "",
+    ]
+    stats = []
+    for row in rows:
+        users, week = await db.users_count(int(row["bot_id"]))
+        stats.append((users, week, row))
+    stats.sort(key=lambda x: x[0], reverse=True)
+    for users, week, row in stats[:25]:
+        mark = "▶️" if mirrors.is_running(int(row["bot_id"])) else "⏸"
+        lines.append(
+            f"{mark} @{esc(row['username'])} · людей {users} (+{week}) · "
+            f'<a href="tg://user?id={row["owner_id"]}">владелец</a>'
+        )
+    if not rows:
+        lines.append("Пока никто не создал зеркало.")
+    lines += ["", f"<i>Лимит на человека: {config.MIRRORS_PER_OWNER}.</i>"]
+    await show(call, "\n".join(lines), back_kb())
+    await call.answer()

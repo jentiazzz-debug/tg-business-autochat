@@ -276,11 +276,260 @@ def styling_checks() -> None:
     )
 
 
+def premium_checks() -> None:
+    """Премиум-иконки: каждая, на которую ссылается код, есть в паке."""
+    import re
+    from pathlib import Path
+
+    import pe
+
+    print("\n=== ПРЕМИУМ-ЭМОДЗИ ===")
+    used: set[str] = set()
+    for path in Path(__file__).resolve().parent.glob("*.py"):
+        src = path.read_text(encoding="utf-8")
+        used |= set(re.findall(r"""\be\(\s*["'](\w+)["']\s*\)""", src))
+        used |= set(re.findall(r"""_b\(\s*\w+,\s*["'](\w+)["']""", src))
+        used |= set(re.findall(r"""btn\(\s*["'](\w+)["']""", src))
+    missing = sorted(n for n in used if n not in pe.ICONS)
+    check("все иконки из кода есть в паке", not missing, f"нет: {missing}" if missing else f"иконок в ходу: {len(used)}")
+
+    tag = pe.e("mute")
+    check("тег собирается с заменителем", tag.startswith("<tg-emoji emoji-id=") and "🔇" in tag)
+    check("strip оставляет заменитель", pe.strip(f"{tag} в муте") == "🔇 в муте")
+
+    import texts
+
+    shown = texts.mute_public("Вася <3", "30 мин")
+    check(
+        "«… в муте» с иконкой и экранированием",
+        "<tg-emoji" in shown and "Вася &lt;3" in shown and "в муте" in shown,
+        pe.strip(shown),
+    )
+
+    from aiogram.methods import SendMessage
+    from aiogram.types import InlineKeyboardMarkup
+
+    import keyboards
+
+    method = SendMessage(
+        chat_id=1,
+        text=f"{tag} привет",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[keyboards.btn("mute", "Мут", callback_data="x")]]),
+    )
+    plain = pe._plain_method(method)
+    button = plain.reply_markup.inline_keyboard[0][0]
+    check(
+        "откат: теги → заменители, иконки сняты с кнопок",
+        plain.text == "🔇 привет" and button.icon_custom_emoji_id is None and button.text == "Мут",
+    )
+    check("откат не трогает исходный запрос", method.text.startswith("<tg-emoji"))
+
+
+def timer_checks() -> None:
+    import timers
+
+    print("\n=== СРОКИ ===")
+    cases = {
+        "30м": 1800, "10мин": 600, "2ч": 7200, "1д": 86400, "1ч30м": 5400,
+        "45": 2700, "30s": 30, "1w": 604800,
+    }
+    bad = {raw: timers.parse_span(raw) for raw, want in cases.items() if timers.parse_span(raw) != want}
+    check("срок разбирается", not bad, f"не так: {bad}" if bad else ", ".join(cases))
+    junk = [raw for raw in ("привет", "", "м", "10 яблок", "-5м", "5x") if timers.parse_span(raw) is not None]
+    check("не срок — None", not junk, f"принял: {junk}" if junk else "")
+    check("срок режется до 30 дней", timers.parse_span("400д") == timers.MAX_SPAN)
+    check(
+        "срок отделяется от текста",
+        timers.split_span("1ч перезвонить ему") == (3600, "перезвонить ему")
+        and timers.split_span("перезвонить через час") == (None, "перезвонить через час"),
+    )
+    check("срок словами", timers.span_words(5400) == "1 ч 30 мин" and timers.span_words(172800) == "2 дн")
+
+
+def help_checks() -> None:
+    import cmdbase
+    import commands  # noqa: F401 — регистрация команд
+    import handlers
+
+    print("\n=== СПРАВКА ===")
+    pages = [cmdbase.help_overview(".")]
+    for group in cmdbase.GROUPS:
+        pages += cmdbase.help_section(group, ".")
+    longest = max(handlers.visible_len(p) for p in pages)
+    check("каждая страница влезает в сообщение", longest <= 4096, f"{len(pages)} стр., максимум {longest} видимых симв.")
+    lost = [c.name for c in cmdbase.ORDER if c.listed and c.group not in cmdbase.GROUPS]
+    check("у каждой команды есть раздел", not lost, f"без раздела: {lost}" if lost else "")
+    for name in ("мут", "размут", "муты", "удалённые", "правки", "сохрани", "напомни", "отложи", "таймеры", "отмени", "свой"):
+        if cmdbase.find(name) is None:
+            check(f"команда .{name} есть", False)
+            break
+    else:
+        check("новые команды зарегистрированы", True, f"всего команд: {len(cmdbase.ORDER)}")
+
+
+def storage_checks() -> None:
+    import asyncio
+
+    from aiogram.fsm.storage.base import StorageKey
+
+    from storage import LeanStorage
+
+    print("\n=== ПАМЯТЬ ===")
+
+    async def run() -> bool:
+        st = LeanStorage()
+        key = StorageKey(bot_id=1, chat_id=2, user_id=2)
+        await st.set_state(key, "Form:text")
+        await st.set_data(key, {"a": 1})
+        filled = await st.get_state(key) == "Form:text" and await st.get_data(key) == {"a": 1}
+        await st.set_state(key, None)
+        await st.set_data(key, {})
+        return filled and not st._states and not st._data
+
+    check("FSM не держит пустые записи", asyncio.run(run()))
+
+
+def db_checks() -> None:
+    """База на временном файле: миграция, след, таймеры, зеркала."""
+    import asyncio
+    import os
+    import tempfile
+    import time
+
+    print("\n=== БАЗА ===")
+
+    async def run() -> list[str]:
+        import config
+        import db
+
+        fails = []
+        with tempfile.TemporaryDirectory() as tmp:
+            config.DB_PATH = __import__("pathlib").Path(tmp) / "t.db"
+            await db.connect()
+            try:
+                await db.set_muted(1, 10, True, int(time.time()) - 1)
+                if [r["chat_id"] for r in await db.expired_mutes(int(time.time()))] != [10]:
+                    fails.append("мут на время не истекает")
+                await db.set_muted(1, 10, False)
+                if await db.expired_mutes(int(time.time())):
+                    fails.append("снятый мут всё ещё в очереди")
+
+                await db.add_trail(1, 10, "del", kind="photo", text="фото", file_id="F")
+                await db.add_trail(1, 10, "edit", text="стало", before="было")
+                dels = await db.trail_of(1, 10, "del")
+                if len(dels) != 1 or dels[0]["file_id"] != "F":
+                    fails.append("след удалённого")
+                if (await db.trail_of(1, 10, "edit"))[0]["before"] != "было":
+                    fails.append("след правок")
+                if await db.trail_of(2, 10, "del"):
+                    fails.append("след виден чужому владельцу")
+
+                tid = await db.add_timer(1, int(time.time()) - 1, "remind", text="позвонить")
+                if [r["id"] for r in await db.due_timers(int(time.time()))] != [tid]:
+                    fails.append("таймер не созрел")
+                if await db.drop_timer(2, tid):
+                    fails.append("чужой таймер удалился")
+                if not await db.drop_timer(1, tid):
+                    fails.append("свой таймер не удалился")
+
+                mid = await db.add_mirror(1, 555, "555:" + "x" * 40, "my_bot", "Мой")
+                again = await db.add_mirror(1, 555, "555:" + "y" * 40, "my_bot", "Мой")
+                if mid != again or len(await db.mirrors_of(1)) != 1:
+                    fails.append("повторное подключение плодит зеркала")
+                await db.seen_user(555, 7)
+                await db.seen_user(555, 7)
+                if (await db.users_count(555))[0] != 1:
+                    fails.append("пользователь зеркала посчитан дважды")
+                await db.mark_blocked(555, 7)
+                if await db.bot_audience():
+                    fails.append("заблокировавший остался в рассылке")
+
+                await db.add_sponsor(-100, "Канал", "https://t.me/x")
+                await db.add_sponsor(-100, "Канал 2", "https://t.me/y")
+                if [r["title"] for r in await db.sponsors()] != ["Канал 2"]:
+                    fails.append("спонсор задвоился")
+            finally:
+                await db.close()
+        return fails
+
+    fails = asyncio.run(run())
+    check("мут на время, след, таймеры, зеркала, спонсоры", not fails, "; ".join(fails))
+
+
+def subs_checks() -> None:
+    """Подписка на поддельном боте: подписан, нет, бот не админ."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from aiogram.exceptions import TelegramBadRequest
+
+    import config
+    import db
+    import subs
+
+    print("\n=== ПОДПИСКА ===")
+
+    class FakeBot:
+        def __init__(self) -> None:
+            self.members: dict[int, str] = {}
+            self.calls = 0
+            self.broken = False
+
+        async def get_chat(self, chat_id):
+            return SimpleNamespace(title="Solutions", username="solutions_org", invite_link=None)
+
+        async def get_chat_member(self, chat_id, user_id):
+            self.calls += 1
+            if self.broken:
+                raise TelegramBadRequest(method=None, message="member list is inaccessible")
+            return SimpleNamespace(status=self.members.get(user_id, "left"))
+
+    async def no_sponsors():
+        return []
+
+    async def run() -> list[str]:
+        fails = []
+        bot = FakeBot()
+        saved = (subs.MAIN_BOT, db.sponsors, config.REQUIRED_CHANNEL)
+        subs.MAIN_BOT, db.sponsors, config.REQUIRED_CHANNEL = bot, no_sponsors, -1003552364867
+        subs.reset_cards()
+        try:
+            need = await subs.missing(5)
+            if [c["url"] for c in need] != ["https://t.me/solutions_org"]:
+                fails.append(f"неподписанному не показан канал: {need}")
+            calls = bot.calls
+            await subs.missing(5)
+            if bot.calls != calls:
+                fails.append("отказ не кэшируется — дёргает Telegram на каждое сообщение")
+            bot.members[5] = "member"
+            if await subs.missing(5, fresh=True):
+                fails.append("«Я подписался» не видит подписку")
+            bot.members[5] = "left"
+            if await subs.missing(5):
+                fails.append("подписанный не закэширован")
+            bot.broken = True
+            if await subs.missing(6):
+                fails.append("бот не админ — людей заперло")
+        finally:
+            subs.MAIN_BOT, db.sponsors, config.REQUIRED_CHANNEL = saved
+            subs.reset_cards()
+        return fails
+
+    fails = asyncio.run(run())
+    check("подписка: стена, кэш, «Я подписался», отказ Telegram", not fails, "; ".join(fails))
+
+
 def main() -> int:
     autoreply_checks()
     guard_checks()
     command_checks()
     styling_checks()
+    premium_checks()
+    timer_checks()
+    help_checks()
+    storage_checks()
+    db_checks()
+    subs_checks()
     print()
     if FAILED:
         print(f"ПРОВАЛЕНО {len(FAILED)}:")

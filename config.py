@@ -67,6 +67,18 @@ BROADCAST_TICK = int(os.getenv("BROADCAST_TICK", "25"))
 #: впиши сюда свой id — иначе чужие люди смогут гонять твой сервер.
 ALLOWED_IDS = _ints(os.getenv("ALLOWED_IDS"))
 
+#: Обязательная подписка на основной канал Solutions — в основном боте и
+#: во всех зеркалах. Основной бот должен быть админом канала: только так
+#: Telegram отвечает ему, подписан ли человек. 0 — без обязательной
+#: подписки. Ссылка нужна, если у канала нет юзернейма и бот не может
+#: сам выпустить приглашение.
+REQUIRED_CHANNEL = int(os.getenv("REQUIRED_CHANNEL", "-1003552364867") or 0)
+REQUIRED_CHANNEL_URL = os.getenv("REQUIRED_CHANNEL_URL", "").strip()
+
+#: Зеркала: сколько ботов может подключить один человек. 0 — зеркала
+#: выключены.
+MIRRORS_PER_OWNER = int(os.getenv("MIRRORS_PER_OWNER", "3"))
+
 DB_PATH = Path(os.getenv("DB_PATH", DATA_DIR / "autochat.db"))
 
 # --------------------------------------------------------------------------

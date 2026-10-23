@@ -42,3 +42,14 @@ def forget_owner(owner_id: int) -> None:
         _decisions.pop(key, None)
     for key in [k for k in _warned if k[0] == owner_id]:
         _warned.discard(key)
+
+
+#: Сколько секунд помнить решение для «.почему».
+KEEP = 3600
+
+
+def prune() -> None:
+    """Забыть старые решения — словарь не должен расти с каждым чатом."""
+    edge = time.time() - KEEP
+    for key in [k for k, v in _decisions.items() if v[0] < edge]:
+        _decisions.pop(key, None)

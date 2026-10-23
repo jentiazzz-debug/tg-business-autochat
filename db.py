@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS connections (
     can_reply    INTEGER NOT NULL DEFAULT 0,
     can_read     INTEGER NOT NULL DEFAULT 1,
     rights       TEXT,
+    bot_id       INTEGER NOT NULL DEFAULT 0,
     created_at   INTEGER NOT NULL,
     updated_at   INTEGER NOT NULL
 );
@@ -93,6 +94,7 @@ CREATE TABLE IF NOT EXISTS chats (
     seen       INTEGER NOT NULL DEFAULT 0,
     replies    INTEGER NOT NULL DEFAULT 0,
     muted      INTEGER NOT NULL DEFAULT 0,
+    muted_until INTEGER NOT NULL DEFAULT 0,
     trusted    INTEGER NOT NULL DEFAULT 0,
     note       TEXT,
     incoming   INTEGER NOT NULL DEFAULT 0,
@@ -175,6 +177,58 @@ CREATE TABLE IF NOT EXISTS log (
     text     TEXT
 );
 CREATE INDEX IF NOT EXISTS log_owner ON log (owner_id, at);
+
+CREATE TABLE IF NOT EXISTS trail (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_id INTEGER NOT NULL,
+    chat_id  INTEGER NOT NULL,
+    at       INTEGER NOT NULL,
+    event    TEXT NOT NULL,
+    kind     TEXT NOT NULL DEFAULT 'text',
+    text     TEXT,
+    before   TEXT,
+    file_id  TEXT
+);
+CREATE INDEX IF NOT EXISTS trail_chat ON trail (owner_id, chat_id, event, at);
+
+CREATE TABLE IF NOT EXISTS timers (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_id INTEGER NOT NULL,
+    due      INTEGER NOT NULL,
+    action   TEXT NOT NULL,
+    chat_id  INTEGER,
+    conn_id  TEXT,
+    title    TEXT,
+    text     TEXT
+);
+CREATE INDEX IF NOT EXISTS timers_due ON timers (due);
+
+CREATE TABLE IF NOT EXISTS sponsors (
+    chat_id  INTEGER PRIMARY KEY,
+    title    TEXT NOT NULL,
+    url      TEXT NOT NULL,
+    added_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mirrors (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_id   INTEGER NOT NULL,
+    bot_id     INTEGER NOT NULL UNIQUE,
+    token      TEXT NOT NULL,
+    username   TEXT NOT NULL DEFAULT '',
+    title      TEXT NOT NULL DEFAULT '',
+    active     INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS mirrors_owner ON mirrors (owner_id);
+
+CREATE TABLE IF NOT EXISTS bot_users (
+    bot_id     INTEGER NOT NULL,
+    user_id    INTEGER NOT NULL,
+    first_seen INTEGER NOT NULL,
+    blocked    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (bot_id, user_id)
+);
 """
 
 #: Поля настроек, которые разрешено менять из админки. Имя столбца
@@ -219,6 +273,11 @@ async def connect() -> None:
     # одновременно читает правила. На стандартном журнале это упирается
     # в блокировки.
     await _db.execute("PRAGMA journal_mode=WAL")
+    # Кэш страниц SQLite — 1 МБ вместо 2 по умолчанию, временные таблицы
+    # на диске. Бот крутится на дешёвых хостингах с лимитом памяти, а
+    # горячие запросы и так бьют в индексы.
+    await _db.execute("PRAGMA cache_size=-1024")
+    await _db.execute("PRAGMA temp_store=FILE")
     await _db.commit()
     await _migrate()
 
@@ -228,7 +287,7 @@ async def connect() -> None:
 #: досыпать вручную — иначе у всех, кто уже запустил бота, обновление
 #: падает на первом же запросе.
 _ADDED = {
-    "connections": {"rights": "TEXT"},
+    "connections": {"rights": "TEXT", "bot_id": "INTEGER NOT NULL DEFAULT 0"},
     "settings": {
         "prefix": "TEXT NOT NULL DEFAULT '.'",
         "commands": "INTEGER NOT NULL DEFAULT 1",
@@ -241,6 +300,7 @@ _ADDED = {
     },
     "chats": {
         "muted": "INTEGER NOT NULL DEFAULT 0",
+        "muted_until": "INTEGER NOT NULL DEFAULT 0",
         "trusted": "INTEGER NOT NULL DEFAULT 0",
         "note": "TEXT",
         "incoming": "INTEGER NOT NULL DEFAULT 0",
@@ -305,6 +365,7 @@ async def save_connection(
     rights: dict[str, bool] | None = None,
     username: str | None = None,
     name: str | None = None,
+    bot_id: int = 0,
 ) -> None:
     """Записать или обновить подключение.
 
@@ -317,9 +378,9 @@ async def save_connection(
         """
         INSERT INTO connections (
             id, owner_id, user_chat_id, username, name,
-            enabled, can_reply, can_read, rights, created_at, updated_at
+            enabled, can_reply, can_read, rights, bot_id, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             owner_id = excluded.owner_id,
             user_chat_id = excluded.user_chat_id,
@@ -329,6 +390,7 @@ async def save_connection(
             can_reply = excluded.can_reply,
             can_read = excluded.can_read,
             rights = COALESCE(excluded.rights, connections.rights),
+            bot_id = CASE WHEN excluded.bot_id THEN excluded.bot_id ELSE connections.bot_id END,
             updated_at = excluded.updated_at
         """,
         (
@@ -341,6 +403,7 @@ async def save_connection(
             int(can_reply),
             int(can_read),
             json.dumps(rights, ensure_ascii=False) if rights else None,
+            bot_id,
             now,
             now,
         ),
@@ -351,12 +414,27 @@ async def connection_by_id(conn_id: str) -> aiosqlite.Row | None:
     return await _one("SELECT * FROM connections WHERE id = ?", (conn_id,))
 
 
-async def connection_of(owner_id: int) -> aiosqlite.Row | None:
-    """Свежайшее подключение владельца."""
+async def connection_of(owner_id: int, bot_id: int = 0) -> aiosqlite.Row | None:
+    """Свежайшее подключение владельца — к этому боту, если он указан.
+
+    Владелец может подключить к Business и основной бот, и зеркало;
+    панель каждого бота должна показывать своё подключение.
+    """
+    if bot_id:
+        return await _one(
+            "SELECT * FROM connections WHERE owner_id = ? AND bot_id = ? "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (owner_id, bot_id),
+        )
     return await _one(
         "SELECT * FROM connections WHERE owner_id = ? ORDER BY updated_at DESC LIMIT 1",
         (owner_id,),
     )
+
+
+async def adopt_legacy(bot_id: int) -> None:
+    """Подключения из версии без зеркал принадлежат основному боту."""
+    await _run("UPDATE connections SET bot_id = ? WHERE bot_id = 0", (bot_id,))
 
 
 async def disable_connection(conn_id: str) -> None:
@@ -557,11 +635,29 @@ async def bump_chat(owner_id: int, chat_id: int, field: str, by: int = 1) -> Non
     )
 
 
-async def set_muted(owner_id: int, chat_id: int, muted: bool) -> None:
+async def set_muted(
+    owner_id: int, chat_id: int, muted: bool, until: int = 0
+) -> None:
+    """Глухой режим. until — когда снять самому, 0 — пока не снимут."""
     await chat_of(owner_id, chat_id)
     await _run(
-        "UPDATE chats SET muted = ? WHERE owner_id = ? AND chat_id = ?",
-        (int(muted), owner_id, chat_id),
+        "UPDATE chats SET muted = ?, muted_until = ? WHERE owner_id = ? AND chat_id = ?",
+        (int(muted), int(until) if muted else 0, owner_id, chat_id),
+    )
+
+
+async def muted_chats(owner_id: int) -> list[aiosqlite.Row]:
+    return await _all(
+        "SELECT * FROM chats WHERE owner_id = ? AND muted = 1 ORDER BY seen DESC",
+        (owner_id,),
+    )
+
+
+async def expired_mutes(now: int) -> list[aiosqlite.Row]:
+    """Муты на время, срок которых вышел, — их снимает фоновая задача."""
+    return await _all(
+        "SELECT * FROM chats WHERE muted = 1 AND muted_until > 0 AND muted_until <= ?",
+        (now,),
     )
 
 
@@ -1061,3 +1157,274 @@ async def prune_log(days: int) -> int:
     )
     await _conn().commit()
     return cur.rowcount or 0
+
+
+# --------------------------------------------------------------------------
+# След: журнал удалённого и правок по чату
+# --------------------------------------------------------------------------
+#
+# Архив messages отдаёт сообщение один раз: показали карточку — запись
+# стёрта. А команды .удалённые и .правки должны поднять историю по
+# чату и через час. Поэтому сам факт удаления или правки ложится сюда и
+# живёт столько же, сколько архив, — keep_days владельца.
+
+
+async def add_trail(
+    owner_id: int,
+    chat_id: int,
+    event: str,
+    *,
+    kind: str = "text",
+    text: str | None = None,
+    before: str | None = None,
+    file_id: str | None = None,
+    at: int | None = None,
+) -> None:
+    if event not in ("del", "edit"):
+        raise ValueError(f"события {event!r} нет")
+    await _run(
+        """
+        INSERT INTO trail (owner_id, chat_id, at, event, kind, text, before, file_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            owner_id,
+            chat_id,
+            int(at or time.time()),
+            event,
+            kind,
+            (text or "")[: config.ARCHIVE_TEXT_LEN],
+            (before or "")[: config.ARCHIVE_TEXT_LEN] or None,
+            file_id,
+        ),
+    )
+
+
+async def trail_of(
+    owner_id: int, chat_id: int, event: str, limit: int = 10
+) -> list[aiosqlite.Row]:
+    """Последние события по чату — старые сверху, как в переписке."""
+    rows = await _all(
+        """
+        SELECT * FROM trail WHERE owner_id = ? AND chat_id = ? AND event = ?
+        ORDER BY at DESC, id DESC LIMIT ?
+        """,
+        (owner_id, chat_id, event, limit),
+    )
+    return rows[::-1]
+
+
+async def prune_trail() -> int:
+    now = int(time.time())
+    cur = await _conn().execute(
+        """
+        DELETE FROM trail WHERE at < (
+            SELECT ? - COALESCE(
+                (SELECT keep_days FROM settings s WHERE s.owner_id = trail.owner_id),
+                ?
+            ) * 86400
+        )
+        """,
+        (now, config.KEEP_DAYS),
+    )
+    await _conn().commit()
+    return cur.rowcount or 0
+
+
+# --------------------------------------------------------------------------
+# Таймеры: напоминания и отложенная отправка
+# --------------------------------------------------------------------------
+#
+# Хранятся в базе, а не в asyncio-задачах: перезапуск бота не должен
+# терять напоминание, поставленное на вечер.
+
+#: Сколько таймеров может висеть у одного владельца.
+MAX_TIMERS = 30
+
+
+async def add_timer(
+    owner_id: int,
+    due: int,
+    action: str,
+    *,
+    chat_id: int | None = None,
+    conn_id: str | None = None,
+    title: str | None = None,
+    text: str | None = None,
+) -> int:
+    if action not in ("remind", "send"):
+        raise ValueError(f"таймера {action!r} нет")
+    cur = await _conn().execute(
+        """
+        INSERT INTO timers (owner_id, due, action, chat_id, conn_id, title, text)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (owner_id, int(due), action, chat_id, conn_id, title, text),
+    )
+    await _conn().commit()
+    return int(cur.lastrowid)
+
+
+async def timers_of(owner_id: int) -> list[aiosqlite.Row]:
+    return await _all(
+        "SELECT * FROM timers WHERE owner_id = ? ORDER BY due", (owner_id,)
+    )
+
+
+async def count_timers(owner_id: int) -> int:
+    row = await _one("SELECT COUNT(*) AS n FROM timers WHERE owner_id = ?", (owner_id,))
+    return int(row["n"]) if row else 0
+
+
+async def due_timers(now: int) -> list[aiosqlite.Row]:
+    return await _all("SELECT * FROM timers WHERE due <= ? ORDER BY due", (now,))
+
+
+async def drop_timer(owner_id: int, timer_id: int) -> bool:
+    cur = await _conn().execute(
+        "DELETE FROM timers WHERE owner_id = ? AND id = ?", (owner_id, timer_id)
+    )
+    await _conn().commit()
+    return bool(cur.rowcount)
+
+
+# --------------------------------------------------------------------------
+# Обязательная подписка: спонсоры
+# --------------------------------------------------------------------------
+
+
+async def sponsors() -> list[aiosqlite.Row]:
+    return await _all("SELECT * FROM sponsors ORDER BY added_at")
+
+
+async def add_sponsor(chat_id: int, title: str, url: str) -> None:
+    await _run(
+        """
+        INSERT INTO sponsors (chat_id, title, url, added_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT (chat_id) DO UPDATE SET title = excluded.title, url = excluded.url
+        """,
+        (chat_id, title, url, int(time.time())),
+    )
+
+
+async def drop_sponsor(chat_id: int) -> None:
+    await _run("DELETE FROM sponsors WHERE chat_id = ?", (chat_id,))
+
+
+# --------------------------------------------------------------------------
+# Зеркала и пользователи по ботам
+# --------------------------------------------------------------------------
+
+
+async def add_mirror(owner_id: int, bot_id: int, token: str, username: str, title: str) -> int:
+    cur = await _conn().execute(
+        """
+        INSERT INTO mirrors (owner_id, bot_id, token, username, title, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (bot_id) DO UPDATE SET
+            owner_id = excluded.owner_id, token = excluded.token,
+            username = excluded.username, title = excluded.title, active = 1
+        """,
+        (owner_id, bot_id, token, username, title, int(time.time())),
+    )
+    await _conn().commit()
+    row = await mirror_by_bot(bot_id)
+    return int(row["id"]) if row else int(cur.lastrowid)
+
+
+async def mirror_by_bot(bot_id: int) -> aiosqlite.Row | None:
+    return await _one("SELECT * FROM mirrors WHERE bot_id = ?", (bot_id,))
+
+
+async def mirror_of(mirror_id: int) -> aiosqlite.Row | None:
+    return await _one("SELECT * FROM mirrors WHERE id = ?", (mirror_id,))
+
+
+async def mirrors_of(owner_id: int) -> list[aiosqlite.Row]:
+    return await _all(
+        "SELECT * FROM mirrors WHERE owner_id = ? ORDER BY id", (owner_id,)
+    )
+
+
+async def active_mirrors() -> list[aiosqlite.Row]:
+    return await _all("SELECT * FROM mirrors WHERE active = 1 ORDER BY id")
+
+
+async def all_mirrors() -> list[aiosqlite.Row]:
+    return await _all("SELECT * FROM mirrors ORDER BY id")
+
+
+async def set_mirror(mirror_id: int, **fields: Any) -> None:
+    allowed = {"token", "username", "title", "active"}
+    bad = set(fields) - allowed
+    if bad:
+        raise ValueError(f"поля {bad} нет")
+    sets = ", ".join(f"{k} = ?" for k in fields)
+    await _run(f"UPDATE mirrors SET {sets} WHERE id = ?", (*fields.values(), mirror_id))
+
+
+async def drop_mirror(mirror_id: int) -> None:
+    await _run("DELETE FROM mirrors WHERE id = ?", (mirror_id,))
+
+
+async def seen_user(bot_id: int, user_id: int) -> None:
+    """Человек написал боту — запомнить, через какого бота с ним говорить."""
+    await _run(
+        """
+        INSERT INTO bot_users (bot_id, user_id, first_seen) VALUES (?, ?, ?)
+        ON CONFLICT (bot_id, user_id) DO UPDATE SET blocked = 0
+        """,
+        (bot_id, user_id, int(time.time())),
+    )
+
+
+async def mark_blocked(bot_id: int, user_id: int) -> None:
+    await _run(
+        "UPDATE bot_users SET blocked = 1 WHERE bot_id = ? AND user_id = ?",
+        (bot_id, user_id),
+    )
+
+
+async def bot_audience() -> list[aiosqlite.Row]:
+    """Все, кому можно написать, — с ботом, через которого писать."""
+    return await _all("SELECT bot_id, user_id FROM bot_users WHERE blocked = 0")
+
+
+async def users_count(bot_id: int) -> tuple[int, int]:
+    """(всего, за неделю) людей у бота — для кабинета зеркала."""
+    week = int(time.time()) - 7 * 86400
+    row = await _one(
+        """
+        SELECT COUNT(*) AS n, SUM(CASE WHEN first_seen >= ? THEN 1 ELSE 0 END) AS w
+        FROM bot_users WHERE bot_id = ?
+        """,
+        (week, bot_id),
+    )
+    return (int(row["n"] or 0), int(row["w"] or 0)) if row else (0, 0)
+
+
+async def connections_count(bot_id: int) -> int:
+    row = await _one(
+        "SELECT COUNT(*) AS n FROM connections WHERE bot_id = ? AND enabled = 1",
+        (bot_id,),
+    )
+    return int(row["n"]) if row else 0
+
+
+async def seed_audience(bot_id: int) -> None:
+    """Люди из версии без зеркал — аудитория основного бота.
+
+    Раньше адресатом рассылки был owner_id из настроек и подключений; с
+    зеркалами нужен ещё и бот, через которого писать. Всех, кто был до
+    них, записываем за основным — один раз, повторы игнорируются.
+    """
+    if await meta_get("audience_seeded"):
+        return
+    now = int(time.time())
+    for chat in await owner_chats():
+        await _conn().execute(
+            "INSERT OR IGNORE INTO bot_users (bot_id, user_id, first_seen) VALUES (?, ?, ?)",
+            (bot_id, chat, now),
+        )
+    await _conn().commit()
+    await meta_set("audience_seeded", "1")

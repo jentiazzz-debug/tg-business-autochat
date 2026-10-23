@@ -5,6 +5,11 @@
 кодируется только адрес экрана и минимум данных, а состояние берётся из
 базы при каждой отрисовке — так две открытые панели не расходятся.
 
+Иконки на кнопках — премиум-эмодзи пака бренда через
+icon_custom_emoji_id: Telegram рисует их перед текстом кнопки. Если он
+их не примет, pe.PremiumFallback снимет иконки и повторит запрос —
+кнопки останутся, просто без картинок.
+
 Схема адресов:
     m:<экран>      переход
     t:<поле>       переключить настройку
@@ -17,6 +22,8 @@
     ig|ign:<chat>  чат в исключения и обратно
     tr:<chat>      доверять чату (антискам его пропускает)
     mu:<chat>      снять глухой режим
+    h:<раздел>[:n] справка по разделу команд, n — страница
+    sub:check      проверить обязательную подписку
 """
 
 from __future__ import annotations
@@ -26,55 +33,66 @@ from typing import Any, Mapping, Sequence
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+import pe
 import texts
 
 
+def _b(kb: InlineKeyboardBuilder, icon: str | None, text: str, **kw: Any) -> None:
+    """Кнопка с иконкой из пака."""
+    if icon:
+        kw["icon_custom_emoji_id"] = pe.id_of(icon)
+    kb.button(text=text, **kw)
+
+
+def btn(icon: str | None, text: str, **kw: Any) -> InlineKeyboardButton:
+    if icon:
+        kw["icon_custom_emoji_id"] = pe.id_of(icon)
+    return InlineKeyboardButton(text=text, **kw)
+
+
 def _mark(flag: Any) -> str:
-    return "🟢" if flag else "⚪️"
+    return "toggle_on" if flag else "toggle_off"
 
 
-def root(st: Mapping[str, Any]) -> InlineKeyboardMarkup:
-    """Главный экран панели."""
+def root(st: Mapping[str, Any], *, mirrors_on: bool = False) -> InlineKeyboardMarkup:
+    """Главный экран панели. mirrors_on — кнопка зеркал (только основной бот)."""
     kb = InlineKeyboardBuilder()
-    kb.button(
-        text=f"{_mark(st['active'])} Автоответы", callback_data="t:active"
-    )
-    kb.button(
-        text=f"{'🌙' if st['away'] else '☀️'} Отошёл", callback_data="t:away"
-    )
-    kb.button(text="💬 Правила", callback_data="m:rules")
-    kb.button(text="🛡 Антискам", callback_data="m:guard")
-    kb.button(text="🗑 След", callback_data="m:trace")
-    kb.button(text="⌨️ Команды", callback_data="m:cmds")
-    kb.button(text="✍️ Тексты", callback_data="m:texts")
-    kb.button(text="⏱ Паузы", callback_data="m:time")
-    kb.button(text="💬 Диалоги", callback_data="m:chats")
-    kb.button(text="📊 Сводка", callback_data="m:stats")
-    kb.button(text="❓ Как это работает", callback_data="m:how")
-    kb.adjust(2, 2, 2, 2, 2, 1)
+    _b(kb, _mark(st["active"]), "Автоответы", callback_data="t:active")
+    _b(kb, "pause" if st["away"] else "play", "Отошёл", callback_data="t:away")
+    _b(kb, "trash", "След", callback_data="m:trace")
+    _b(kb, "shield", "Антискам", callback_data="m:guard")
+    _b(kb, "checklist", "Правила", callback_data="m:rules")
+    _b(kb, "code", "Команды", callback_data="m:cmds")
+    _b(kb, "edit", "Тексты", callback_data="m:texts")
+    _b(kb, "timer", "Паузы", callback_data="m:time")
+    _b(kb, "chats", "Диалоги", callback_data="m:chats")
+    _b(kb, "bar_chart", "Сводка", callback_data="m:stats")
+    _b(kb, "faq", "Как это работает", callback_data="m:how")
+    if mirrors_on:
+        _b(kb, "rocket", "Своё зеркало бота", callback_data="mr:home")
+    kb.adjust(2, 2, 2, 2, 2, 1, 1)
     return kb.as_markup()
 
 
 def back(to: str = "m:root") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="‹ Назад", callback_data=to)]]
-    )
+    return InlineKeyboardMarkup(inline_keyboard=[[btn("back", "Назад", callback_data=to)]])
 
 
 def rules(items: Sequence[Mapping[str, Any]]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for i, rule in enumerate(items, 1):
-        mark = "" if rule["enabled"] else "⚪️ "
-        kb.button(
-            text=f"{mark}{i}. {texts.short(rule['triggers'], 28)}",
+        _b(
+            kb,
+            None if rule["enabled"] else "toggle_off",
+            f"{i}. {texts.short(rule['triggers'], 28)}",
             callback_data=f"r:{rule['id']}",
         )
     kb.adjust(1)
     tail = InlineKeyboardBuilder()
-    tail.button(text="＋ Добавить правило", callback_data="r:add")
+    _b(tail, "plus", "Добавить правило", callback_data="r:add")
     if not items:
-        tail.button(text="✨ Добавить примеры", callback_data="r:samples")
-    tail.button(text="‹ Назад", callback_data="m:root")
+        _b(tail, "sparkle", "Добавить примеры", callback_data="r:samples")
+    _b(tail, "back", "Назад", callback_data="m:root")
     tail.adjust(1)
     kb.attach(tail)
     return kb.as_markup()
@@ -82,35 +100,35 @@ def rules(items: Sequence[Mapping[str, Any]]) -> InlineKeyboardMarkup:
 
 def rule(rule_id: int, enabled: Any) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(
-        text="⏸ Выключить" if enabled else "▶️ Включить",
+    _b(
+        kb,
+        "pause" if enabled else "play",
+        "Выключить" if enabled else "Включить",
         callback_data=f"r:{rule_id}:t",
     )
-    kb.button(text="✍️ Изменить ответ", callback_data=f"r:{rule_id}:e")
-    kb.button(text="🗑 Удалить", callback_data=f"r:{rule_id}:d")
-    kb.button(text="‹ К правилам", callback_data="m:rules")
+    _b(kb, "edit", "Изменить ответ", callback_data=f"r:{rule_id}:e")
+    _b(kb, "trash", "Удалить", callback_data=f"r:{rule_id}:d")
+    _b(kb, "back", "К правилам", callback_data="m:rules")
     kb.adjust(2, 1, 1)
     return kb.as_markup()
 
 
 def confirm_delete(rule_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="🗑 Да, удалить", callback_data=f"r:{rule_id}:D")
-    kb.button(text="‹ Отмена", callback_data=f"r:{rule_id}")
+    _b(kb, "trash", "Да, удалить", callback_data=f"r:{rule_id}:D")
+    _b(kb, "back", "Отмена", callback_data=f"r:{rule_id}")
     kb.adjust(1)
     return kb.as_markup()
 
 
 def texts_menu(st: Mapping[str, Any]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="✍️ Текст «отошёл»", callback_data="e:away_text")
-    kb.button(text=f"{_mark(st['greet'])} Приветствие", callback_data="t:greet")
-    kb.button(text="✍️ Текст приветствия", callback_data="e:greet_text")
-    kb.button(
-        text=f"{_mark(st['fallback'])} Ответ по умолчанию", callback_data="t:fallback"
-    )
-    kb.button(text="✍️ Текст по умолчанию", callback_data="e:fallback_text")
-    kb.button(text="‹ Назад", callback_data="m:root")
+    _b(kb, "edit", "Текст «отошёл»", callback_data="e:away_text")
+    _b(kb, _mark(st["greet"]), "Приветствие", callback_data="t:greet")
+    _b(kb, "edit", "Текст приветствия", callback_data="e:greet_text")
+    _b(kb, _mark(st["fallback"]), "Ответ по умолчанию", callback_data="t:fallback")
+    _b(kb, "edit", "Текст по умолчанию", callback_data="e:fallback_text")
+    _b(kb, "back", "Назад", callback_data="m:root")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -130,40 +148,39 @@ SCORES = ((2, "2 · строго"), (3, "3 · как надо"), (4, "4"), (5, "
 PREFIXES = (".", "!", ",", ";", "~")
 
 
+def _pick(flag: bool) -> str | None:
+    return "check" if flag else None
+
+
 def timings(st: Mapping[str, Any]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for value, label in COOLDOWNS:
-        picked = "• " if int(st["cooldown"]) == value else ""
-        kb.button(text=f"{picked}{label}", callback_data=f"cd:{value}")
+        _b(kb, _pick(int(st["cooldown"]) == value), label, callback_data=f"cd:{value}")
     kb.adjust(3, 3)
     tail = InlineKeyboardBuilder()
     for value, label in PAUSES:
-        picked = "• " if int(st["pause_minutes"]) == value else ""
-        tail.button(text=f"{picked}{label}", callback_data=f"pa:{value}")
+        _b(tail, _pick(int(st["pause_minutes"]) == value), label, callback_data=f"pa:{value}")
     tail.adjust(3, 3)
     kb.attach(tail)
     end = InlineKeyboardBuilder()
-    end.button(text="‹ Назад", callback_data="m:root")
+    _b(end, "back", "Назад", callback_data="m:root")
     kb.attach(end)
     return kb.as_markup()
 
 
 def trace(st: Mapping[str, Any]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text=f"{_mark(st['spy'])} Ловить удалённые", callback_data="t:spy")
-    kb.button(
-        text=f"{_mark(st['spy_edits'])} Сообщать о правках", callback_data="t:spy_edits"
-    )
+    _b(kb, _mark(st["spy"]), "Ловить удалённые", callback_data="t:spy")
+    _b(kb, _mark(st["spy_edits"]), "Сообщать о правках", callback_data="t:spy_edits")
     kb.adjust(1)
     days = InlineKeyboardBuilder()
     for value, label in KEEP:
-        picked = "• " if int(st["keep_days"]) == value else ""
-        days.button(text=f"{picked}{label}", callback_data=f"kd:{value}")
+        _b(days, _pick(int(st["keep_days"]) == value), label, callback_data=f"kd:{value}")
     days.adjust(3, 2)
     kb.attach(days)
     tail = InlineKeyboardBuilder()
-    tail.button(text="🧹 Очистить архив", callback_data="arch:clear")
-    tail.button(text="‹ Назад", callback_data="m:root")
+    _b(tail, "trash", "Очистить архив", callback_data="arch:clear")
+    _b(tail, "back", "Назад", callback_data="m:root")
     tail.adjust(1)
     kb.attach(tail)
     return kb.as_markup()
@@ -171,25 +188,23 @@ def trace(st: Mapping[str, Any]) -> InlineKeyboardMarkup:
 
 def guard(st: Mapping[str, Any]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text=f"{_mark(st['filter_on'])} Фильтр", callback_data="t:filter_on")
-    kb.button(
-        text="🗑 Удаляет" if st["filter_delete"] else "🔔 Только сообщает",
+    _b(kb, _mark(st["filter_on"]), "Фильтр", callback_data="t:filter_on")
+    _b(
+        kb,
+        "trash" if st["filter_delete"] else "bell",
+        "Удаляет" if st["filter_delete"] else "Только сообщает",
         callback_data="t:filter_delete",
     )
     kb.adjust(2)
     scores = InlineKeyboardBuilder()
     for value, label in SCORES:
-        picked = "• " if int(st["filter_score"]) == value else ""
-        scores.button(text=f"{picked}{label}", callback_data=f"fs:{value}")
+        _b(scores, _pick(int(st["filter_score"]) == value), label, callback_data=f"fs:{value}")
     scores.adjust(2, 2)
     kb.attach(scores)
     tail = InlineKeyboardBuilder()
-    tail.button(text="✍️ Свои слова", callback_data="e:filter_words")
-    tail.button(
-        text=f"{_mark(st['notify_new'])} Сообщать о новых диалогах",
-        callback_data="t:notify_new",
-    )
-    tail.button(text="‹ Назад", callback_data="m:root")
+    _b(tail, "edit", "Свои слова", callback_data="e:filter_words")
+    _b(tail, _mark(st["notify_new"]), "Сообщать о новых диалогах", callback_data="t:notify_new")
+    _b(tail, "back", "Назад", callback_data="m:root")
     tail.adjust(1)
     kb.attach(tail)
     return kb.as_markup()
@@ -197,31 +212,63 @@ def guard(st: Mapping[str, Any]) -> InlineKeyboardMarkup:
 
 def commands(st: Mapping[str, Any]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text=f"{_mark(st['commands'])} Команды", callback_data="t:commands")
+    _b(kb, _mark(st["commands"]), "Команды в чатах", callback_data="t:commands")
     kb.adjust(1)
     pref = InlineKeyboardBuilder()
     for sign in PREFIXES:
-        picked = "• " if st["prefix"] == sign else ""
-        pref.button(text=f"{picked}{sign}", callback_data=f"pf:{sign}")
+        _b(pref, _pick(st["prefix"] == sign), sign, callback_data=f"pf:{sign}")
     pref.adjust(5)
     kb.attach(pref)
     tail = InlineKeyboardBuilder()
-    tail.button(text="📖 Показать все команды", callback_data="cmd:list")
-    tail.button(text="‹ Назад", callback_data="m:root")
+    _b(tail, "menu", "Справка по командам", callback_data="h:")
+    _b(tail, "back", "Назад", callback_data="m:root")
     tail.adjust(1)
     kb.attach(tail)
+    return kb.as_markup()
+
+
+def help_menu(back_to: str | None = None) -> InlineKeyboardMarkup:
+    """Кнопки разделов под обзором справки."""
+    import cmdbase
+
+    kb = InlineKeyboardBuilder()
+    for group in cmdbase.GROUPS:
+        if not cmdbase.listed(group):
+            continue
+        icon, title, _ = cmdbase.group_title(group)
+        _b(kb, icon, title, callback_data=f"h:{group}")
+    kb.adjust(3)
+    if back_to:
+        tail = InlineKeyboardBuilder()
+        _b(tail, "back", "Назад", callback_data=back_to)
+        kb.attach(tail)
+    return kb.as_markup()
+
+
+def help_page(group: str, page: int, pages: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if page > 0:
+        _b(kb, "chevron_left", "Назад", callback_data=f"h:{group}:{page - 1}")
+    if page + 1 < pages:
+        _b(kb, "chevron_right", "Дальше", callback_data=f"h:{group}:{page + 1}")
+    _b(kb, "menu", "Все разделы", callback_data="h:")
+    kb.adjust(2 if page > 0 and page + 1 < pages else 1, 1)
     return kb.as_markup()
 
 
 def chats(items: Sequence[Mapping[str, Any]]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for chat in items:
-        mark = "🔕 " if chat["ignored"] else ""
         name = texts.short(chat["title"] or str(chat["chat_id"]), 26)
-        kb.button(text=f"{mark}{name}", callback_data=f"ig:{chat['chat_id']}")
+        _b(
+            kb,
+            "bell_off" if chat["ignored"] else ("mute" if chat["muted"] else None),
+            name,
+            callback_data=f"ig:{chat['chat_id']}",
+        )
     kb.adjust(1)
     tail = InlineKeyboardBuilder()
-    tail.button(text="‹ Назад", callback_data="m:root")
+    _b(tail, "back", "Назад", callback_data="m:root")
     kb.attach(tail)
     return kb.as_markup()
 
@@ -239,8 +286,8 @@ def deleted(chat_id: int) -> InlineKeyboardMarkup:
     понимает, показать ли экран «Диалоги» или обойтись всплывашкой.
     """
     kb = InlineKeyboardBuilder()
-    kb.button(text="👤 Открыть чат", url=f"tg://user?id={chat_id}")
-    kb.button(text="🔕 Не отвечать в чате", callback_data=f"ign:{chat_id}")
+    _b(kb, "user", "Открыть чат", url=f"tg://user?id={chat_id}")
+    _b(kb, "bell_off", "Не отвечать в чате", callback_data=f"ign:{chat_id}")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -248,33 +295,38 @@ def deleted(chat_id: int) -> InlineKeyboardMarkup:
 def filtered(chat_id: int) -> InlineKeyboardMarkup:
     """Под карточкой антискама: главное — возможность его переубедить."""
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Это не спам, доверять", callback_data=f"tr:{chat_id}")
-    kb.button(text="🔇 В глухой режим", callback_data=f"mu:{chat_id}")
-    kb.button(text="👤 Открыть чат", url=f"tg://user?id={chat_id}")
+    _b(kb, "shield_check", "Это не спам, доверять", callback_data=f"tr:{chat_id}")
+    _b(kb, "mute", "В мут", callback_data=f"mu:{chat_id}")
+    _b(kb, "user", "Открыть чат", url=f"tg://user?id={chat_id}")
     kb.adjust(1)
     return kb.as_markup()
 
 
 def muted(chat_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="🔊 Снять глухой режим", callback_data=f"mu:{chat_id}")
-    kb.button(text="👤 Открыть чат", url=f"tg://user?id={chat_id}")
+    _b(kb, "volume", "Снять мут", callback_data=f"mu:{chat_id}")
+    _b(kb, "user", "Открыть чат", url=f"tg://user?id={chat_id}")
     kb.adjust(1)
     return kb.as_markup()
 
 
 def new_dialog(chat_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="🔇 В глухой режим", callback_data=f"mu:{chat_id}")
-    kb.button(text="🔕 Не отвечать в чате", callback_data=f"ign:{chat_id}")
-    kb.button(text="👤 Открыть чат", url=f"tg://user?id={chat_id}")
+    _b(kb, "mute", "В мут", callback_data=f"mu:{chat_id}")
+    _b(kb, "bell_off", "Не отвечать в чате", callback_data=f"ign:{chat_id}")
+    _b(kb, "user", "Открыть чат", url=f"tg://user?id={chat_id}")
     kb.adjust(1)
     return kb.as_markup()
 
 
 def cancel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="✖️ Отмена", callback_data="m:root")]
-        ]
+        inline_keyboard=[[btn("cross", "Отмена", callback_data="m:root")]]
     )
+
+
+def subscribe(channels: Sequence[Mapping[str, Any]]) -> InlineKeyboardMarkup:
+    """Обязательная подписка: по кнопке на канал и «Проверить»."""
+    rows = [[btn("megaphone", ch["title"], url=ch["url"])] for ch in channels]
+    rows.append([btn("check", "Я подписался", callback_data="sub:check")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
