@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import html
 import operator
 import time
@@ -531,6 +532,68 @@ async def cmd_calc(ctx: Ctx) -> None:
         return
     pretty = f"{value:.10g}"
     await ctx.replace(f"{e('code')}{esc(expression)} = <b>{pretty}</b>", html=True)
+
+
+#: .спам: сколько раз по умолчанию и максимум. Больше 20 — уже не шутка,
+#: а флуд, за который Telegram режет бизнес-подключение.
+SPAM_DEFAULT = 5
+SPAM_MAX = 20
+SPAM_PAUSE = 0.5
+
+#: Чаты, где спам идёт прямо сейчас: (владелец, чат) → флаг «остановить».
+_spamming: dict[tuple[int, int], bool] = {}
+
+
+def spam_args(raw: str) -> tuple[str, int]:
+    """«лох 20» → («лох», 20). Число — последним словом, без него — 5.
+
+    Отдельной функцией, чтобы selfcheck проверял разбор без Telegram.
+    """
+    words = raw.split()
+    count = SPAM_DEFAULT
+    if len(words) > 1 and words[-1].isdigit():
+        count = int(words[-1])
+        words = words[:-1]
+    return " ".join(words), max(1, min(count, SPAM_MAX))
+
+
+@command(
+    "спам", "флуд",
+    group="диалог",
+    about=f"повторить текст в чате, до {SPAM_MAX} раз; «стоп» — остановить",
+    usage="текст [сколько]",
+    example="лох 20",
+    needs=("can_reply",),
+)
+async def cmd_spam(ctx: Ctx) -> None:
+    key = (ctx.owner_id, ctx.chat_id)
+    raw = ctx.args.strip()
+    if raw.lower() in ("стоп", "хватит", "stop"):
+        await ctx.drop_command()
+        if key in _spamming:
+            _spamming[key] = True
+        return
+    text, count = spam_args(raw)
+    if not text:
+        await ctx.fail(
+            f"формат: <code>.спам лох 20</code> — текст и число, максимум {SPAM_MAX}"
+        )
+        return
+    if key in _spamming:
+        await ctx.fail("в этом чате спам уже идёт — <code>.спам стоп</code>, чтобы остановить")
+        return
+    _spamming[key] = False
+    await ctx.drop_command()
+    try:
+        for _ in range(count):
+            if _spamming.get(key):
+                break
+            # plain text: что владелец написал, то и уйдёт, без разметки.
+            if await ctx.send(text[:4000]) is None:
+                break
+            await asyncio.sleep(SPAM_PAUSE)
+    finally:
+        _spamming.pop(key, None)
 
 
 @command("пинг", "отклик", group="служба", about="задержка до Telegram")

@@ -365,7 +365,18 @@ def help_checks() -> None:
     check("каждая страница влезает в сообщение", longest <= 4096, f"{len(pages)} стр., максимум {longest} видимых симв.")
     lost = [c.name for c in cmdbase.ORDER if c.listed and c.group not in cmdbase.GROUPS]
     check("у каждой команды есть раздел", not lost, f"без раздела: {lost}" if lost else "")
-    for name in ("мут", "размут", "муты", "удалённые", "правки", "сохрани", "напомни", "отложи", "таймеры", "отмени", "свой"):
+    import cmd_chat
+
+    cases = {
+        "лох 20": ("лох", 20),
+        "лох": ("лох", 5),
+        "ты лох 100": ("ты лох", 20),
+        "лох 0": ("лох", 1),
+        "20": ("20", 5),
+    }
+    bad = {raw: cmd_chat.spam_args(raw) for raw, want in cases.items() if cmd_chat.spam_args(raw) != want}
+    check(".спам: текст и число, максимум 20", not bad, f"не так: {bad}" if bad else "")
+    for name in ("мут", "размут", "муты", "удалённые", "правки", "сохрани", "напомни", "отложи", "таймеры", "отмени", "свой", "спам"):
         if cmdbase.find(name) is None:
             check(f"команда .{name} есть", False)
             break
